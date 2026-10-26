@@ -1,0 +1,8 @@
+/target
+/tmp
+/extension/target
+/extension/ui/target
+/extension/dist
+/tests/e2e/node_modules
+/tests/e2e/test-results
+/dist

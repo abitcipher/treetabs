@@ -1,0 +1,19 @@
+[package]
+name = "treetabs-sync"
+description = "treetabs server (store owner), client connection and the native messaging host"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "treetabs-host"
+path = "src/bin/host.rs"
+
+[dependencies]
+treetabs-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger = "0.11"

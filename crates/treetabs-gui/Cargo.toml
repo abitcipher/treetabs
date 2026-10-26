@@ -1,0 +1,21 @@
+[package]
+name = "treetabs-gui"
+description = "egui viewer/editor for treetabs trees"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+treetabs-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_ltreeview.workspace = true
+treetabs-ui.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+treetabs-sync.workspace = true
+log.workspace = true
+env_logger = "0.11"
+egui_extras = { version = "0.36", features = ["http", "image"] }
+image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "gif", "webp"] }
+rfd = "0.15"

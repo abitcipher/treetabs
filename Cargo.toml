@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/treetabs-core", "crates/treetabs-cli", "crates/treetabs-gui", "crates/treetabs-sync", "crates/treetabs-ui", "xtask"]
+exclude = ["extension"]
+
+[workspace.package]
+edition = "2024"
+version = "0.2.0"
+license = "MIT"
+
+[workspace.dependencies]
+treetabs-core = { path = "crates/treetabs-core" }
+treetabs-sync = { path = "crates/treetabs-sync" }
+treetabs-ui = { path = "crates/treetabs-ui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+anyhow = "1"
+snap = "1.1"
+log = "0.4"
+clap = { version = "4", features = ["derive"] }
+# egui_ltreeview 0.9 targets egui 0.36, so eframe stays on 0.36 too.
+eframe = "0.36"
+egui = "0.36"
+egui_ltreeview = "0.9"

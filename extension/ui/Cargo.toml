@@ -1,0 +1,27 @@
+[package]
+name = "treetabs-extension-ui"
+description = "The tree window of the extension: treetabs-ui compiled to wasm"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+treetabs-ui = { path = "../../crates/treetabs-ui" }
+treetabs-core = { path = "../../crates/treetabs-core" }
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.36"
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console", "Document", "Window", "HtmlCanvasElement", "Element", "Storage", "Location", "Response", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "HtmlInputElement", "FileList", "File"] }
+log = "0.4"
+egui_extras = { version = "0.36", features = ["http", "image"] }
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

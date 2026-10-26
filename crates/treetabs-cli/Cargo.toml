@@ -1,0 +1,17 @@
+[package]
+name = "treetabs-cli"
+description = "Convert Tabs Outliner data into portable treetabs JSON"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "treetabs"
+path = "src/main.rs"
+
+[dependencies]
+treetabs-core.workspace = true
+treetabs-sync.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true

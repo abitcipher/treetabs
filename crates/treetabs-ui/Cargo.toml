@@ -1,0 +1,19 @@
+[package]
+name = "treetabs-ui"
+description = "The treetabs tree editor (egui), shared by the desktop app and the extension page"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+treetabs-core.workspace = true
+eframe = { workspace = true, default-features = false }
+egui.workspace = true
+egui_ltreeview.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+log.workspace = true
+unicode-bidi = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
