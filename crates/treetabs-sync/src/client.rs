@@ -21,6 +21,15 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Send one message to the server.
+    ///
+    /// # Errors
+    ///
+    /// When the connection is gone.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while sending (poisoned lock).
     pub fn send(&self, msg: &ClientMsg) -> std::io::Result<()> {
         let mut w = self.writer.lock().expect("writer lock");
         write_line(&mut *w, msg)
@@ -46,6 +55,15 @@ impl Connection {
 pub struct Sender(Arc<Mutex<UnixStream>>);
 
 impl Sender {
+    /// Send one message to the server.
+    ///
+    /// # Errors
+    ///
+    /// When the connection is gone.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while sending (poisoned lock).
     pub fn send(&self, msg: &ClientMsg) -> std::io::Result<()> {
         let mut w = self.0.lock().expect("writer lock");
         write_line(&mut *w, msg)
@@ -72,6 +90,11 @@ pub enum ConnectError {
 ///
 /// `notify` is called (from the reader thread) after each message is queued,
 /// for example to wake up a GUI.
+///
+/// # Errors
+///
+/// When the server cannot be reached or started (for example the store
+/// is damaged).
 pub fn connect(
     dir: &Path,
     role: Role,
@@ -120,7 +143,14 @@ pub fn connect(
         drop(tx);
         notify();
     });
-    let conn = Connection { writer: Arc::new(Mutex::new(stream)), rx, server };
-    conn.send(&ClientMsg::Hello { role, name: name.to_owned() })?;
+    let conn = Connection {
+        writer: Arc::new(Mutex::new(stream)),
+        rx,
+        server,
+    };
+    conn.send(&ClientMsg::Hello {
+        role,
+        name: name.to_owned(),
+    })?;
     Ok(conn)
 }

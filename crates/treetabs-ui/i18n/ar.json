@@ -169,6 +169,7 @@
  "{n} browser(s) connected": "متصفحات متصلة: {n}",
  "{n} days": "{n} يومًا",
  "{n} match(es); double-click opens in the browser": "نتائج: {n}؛ انقر مرتين للفتح في المتصفح",
+ "{n} nodes selected": "العناصر المحددة: {n}",
  "{title}: {n} nodes added at the end": "{title}: أُضيفت عناصر عددها {n} إلى النهاية",
  "{title}: {n} nodes added at the end ({warnings} warnings)": "{title}: أُضيفت عناصر عددها {n} إلى النهاية (تحذيرات: {warnings})"
 }

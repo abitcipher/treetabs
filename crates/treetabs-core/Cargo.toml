@@ -2,6 +2,7 @@
 name = "treetabs-core"
 description = "Tree model and readers for Tabs Outliner data (JSON export and Chromium IndexedDB)"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 
@@ -15,3 +16,6 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+
+[lints]
+workspace = true

@@ -169,6 +169,7 @@
  "{n} browser(s) connected": "Подключено браузеров: {n}",
  "{n} days": "{n} дней",
  "{n} match(es); double-click opens in the browser": "Найдено: {n}; двойной щелчок открывает в браузере",
+ "{n} nodes selected": "Выбрано элементов: {n}",
  "{title}: {n} nodes added at the end": "{title}: в конец добавлено элементов: {n}",
  "{title}: {n} nodes added at the end ({warnings} warnings)": "{title}: в конец добавлено элементов: {n} (предупреждений: {warnings})"
 }

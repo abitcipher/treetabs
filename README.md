@@ -13,7 +13,7 @@ mirrors that tree into a bookmark folder, and stays fast with tens of thousands 
 * [Building and installing](docs/INSTALL.md): tools, build, native host, loading the extension in each browser, troubleshooting.
 * [Publishing](docs/PUBLISHING.md): Chrome Web Store (also Brave), Firefox Add-ons, Opera Add-ons.
 
-Version 0.2.0. Works with Chromium, Google Chrome, Brave, Opera and Firefox (including the Ubuntu snaps), in 15 interface languages.
+Version 0.3.0. Works with Chromium, Google Chrome, Brave, Opera and Firefox (including the Ubuntu snaps), in 15 interface languages.
 
 ---
 

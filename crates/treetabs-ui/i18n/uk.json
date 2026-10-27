@@ -169,6 +169,7 @@
  "{n} browser(s) connected": "Підключено браузерів: {n}",
  "{n} days": "{n} днів",
  "{n} match(es); double-click opens in the browser": "Знайдено: {n}; подвійне клацання відкриває в браузері",
+ "{n} nodes selected": "Вибрано елементів: {n}",
  "{title}: {n} nodes added at the end": "{title}: в кінець додано елементів: {n}",
  "{title}: {n} nodes added at the end ({warnings} warnings)": "{title}: в кінець додано елементів: {n} (попереджень: {warnings})"
 }

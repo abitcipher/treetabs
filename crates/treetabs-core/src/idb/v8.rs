@@ -7,6 +7,12 @@
 use super::leveldb::varint;
 use serde_json::{Map, Number, Value};
 
+/// Deepest nesting of objects and arrays decoded (the same limit as
+/// `serde_json`). Real extension data is a
+/// few levels deep; the limit keeps damaged or crafted input from
+/// overflowing the stack (which would abort the whole process).
+const MAX_DEPTH: u32 = 128;
+
 #[derive(Debug, thiserror::Error)]
 #[error("v8 value at byte {pos}: {msg}")]
 pub struct V8Error {
@@ -15,8 +21,18 @@ pub struct V8Error {
 }
 
 /// Decode a V8 payload that starts with the `0xFF <version>` header.
+///
+/// # Errors
+///
+/// When the data is truncated, nested more than 128 levels deep, or uses a
+/// tag this decoder does not know; the error gives the byte position.
 pub fn decode(bytes: &[u8]) -> Result<Value, V8Error> {
-    let mut d = Decoder { b: bytes, pos: 0, objects: Vec::new() };
+    let mut d = Decoder {
+        b: bytes,
+        pos: 0,
+        objects: Vec::new(),
+        depth: 0,
+    };
     d.skip_padding();
     if d.peek() == Some(0xFF) {
         d.pos += 1;
@@ -30,11 +46,16 @@ struct Decoder<'a> {
     pos: usize,
     /// Completed objects by id, for `^` back-references.
     objects: Vec<Value>,
+    /// Current nesting of `value` calls (see [`MAX_DEPTH`]).
+    depth: u32,
 }
 
 impl Decoder<'_> {
     fn err<T>(&self, msg: impl Into<String>) -> Result<T, V8Error> {
-        Err(V8Error { pos: self.pos, msg: msg.into() })
+        Err(V8Error {
+            pos: self.pos,
+            msg: msg.into(),
+        })
     }
 
     fn peek(&self) -> Option<u8> {
@@ -58,7 +79,16 @@ impl Decoder<'_> {
     }
 
     fn varint(&mut self) -> Result<u64, V8Error> {
-        varint(self.b, &mut self.pos).map_err(|m| V8Error { pos: self.pos, msg: m })
+        varint(self.b, &mut self.pos).map_err(|m| V8Error {
+            pos: self.pos,
+            msg: m,
+        })
+    }
+
+    /// A varint that is a length, count or object id.
+    fn varint_usize(&mut self) -> Result<usize, V8Error> {
+        let v = self.varint()?;
+        usize::try_from(v).or_else(|_| self.err(format!("length {v} too large")))
     }
 
     fn take(&mut self, n: usize) -> Result<&[u8], V8Error> {
@@ -73,12 +103,16 @@ impl Decoder<'_> {
     }
 
     fn f64(&mut self) -> Result<f64, V8Error> {
-        Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(f64::from_le_bytes(
+            self.take(8)?.try_into().expect("take(8) gives 8 bytes"),
+        ))
     }
 
     fn zigzag(&mut self) -> Result<i64, V8Error> {
         let u = self.varint()?;
-        Ok(((u >> 1) as i64) ^ -((u & 1) as i64))
+        // Zigzag: the low bit is the sign. `u >> 1` fits in an i64.
+        let half = i64::try_from(u >> 1).expect("u64 >> 1 fits in i64");
+        Ok(if u & 1 == 0 { half } else { !half })
     }
 
     /// Reserve an object id now and fill it when the object is complete.
@@ -88,6 +122,16 @@ impl Decoder<'_> {
     }
 
     fn value(&mut self) -> Result<Value, V8Error> {
+        if self.depth >= MAX_DEPTH {
+            return self.err(format!("values nested deeper than {MAX_DEPTH} levels"));
+        }
+        self.depth += 1;
+        let v = self.value_inner();
+        self.depth -= 1;
+        v
+    }
+
+    fn value_inner(&mut self) -> Result<Value, V8Error> {
         self.skip_padding();
         let tag = self.byte()?;
         Ok(match tag {
@@ -101,121 +145,118 @@ impl Decoder<'_> {
             b'"' => Value::String(self.latin1()?),
             b'c' => Value::String(self.utf16()?),
             b'S' => Value::String(self.utf8()?),
-            b'D' => {
-                let id = self.reserve();
-                let v = num(self.f64()?);
-                self.objects[id] = v.clone();
-                v
-            }
-            // Boxed primitives: new Number(1), new Boolean(true), …
-            b'n' | b'y' | b'x' | b's' | b'z' => {
-                let id = self.reserve();
-                let v = match tag {
-                    b'n' => num(self.f64()?),
-                    b'y' => Value::Bool(true),
-                    b'x' => Value::Bool(false),
-                    b'z' => Value::String(self.bigint()?),
-                    _ => self.value()?,
-                };
-                self.objects[id] = v.clone();
-                v
-            }
             b'^' => {
-                let id = self.varint()? as usize;
+                let id = self.varint_usize()?;
                 match self.objects.get(id) {
                     Some(v) => v.clone(),
                     None => return self.err(format!("bad object reference {id}")),
                 }
             }
-            b'o' => {
+            b'D' | b'n' | b'y' | b'x' | b's' | b'z' | b'o' | b'A' | b'a' | b';' | b'\'' | b'R' => {
+                // Objects get an id first, so `^` can refer back to them.
                 let id = self.reserve();
+                let v = self.object(tag)?;
+                self.objects[id] = v.clone();
+                v
+            }
+            other => {
+                return self.err(format!(
+                    "unsupported tag 0x{other:02x} ({:?})",
+                    other as char
+                ));
+            }
+        })
+    }
+
+    /// The body of an object-like value (one that gets an id).
+    fn object(&mut self, tag: u8) -> Result<Value, V8Error> {
+        Ok(match tag {
+            b'D' | b'n' => num(self.f64()?), // Date, new Number(…)
+            // Other boxed primitives: new Boolean(…), new BigInt, new String(…)
+            b'y' => Value::Bool(true),
+            b'x' => Value::Bool(false),
+            b'z' => Value::String(self.bigint()?),
+            b's' => self.value()?,
+            b'o' => {
                 let mut m = Map::new();
                 self.properties(&mut m, b'{')?;
                 self.varint()?; // property count
-                let v = Value::Object(m);
-                self.objects[id] = v.clone();
-                v
+                Value::Object(m)
             }
-            b'A' => {
-                let id = self.reserve();
-                let len = self.varint()? as usize;
-                let mut arr = Vec::with_capacity(len.min(1 << 20));
-                for _ in 0..len {
-                    arr.push(self.value()?);
-                }
-                // Extra named properties may follow before the end tag.
-                let mut extra = Map::new();
-                self.properties(&mut extra, b'$')?;
-                self.varint()?;
-                self.varint()?;
-                let v = Value::Array(arr);
-                self.objects[id] = v.clone();
-                v
-            }
-            b'a' => {
-                let id = self.reserve();
-                let len = self.varint()? as usize;
-                let mut arr = vec![Value::Null; len.min(1 << 20)];
-                let mut extra = Map::new();
-                self.properties(&mut extra, b'@')?;
-                self.varint()?;
-                self.varint()?;
-                for (k, v) in extra {
-                    if let Ok(i) = k.parse::<usize>()
-                        && i < arr.len()
-                    {
-                        arr[i] = v;
-                    }
-                }
-                let v = Value::Array(arr);
-                self.objects[id] = v.clone();
-                v
-            }
-            b';' => {
-                // Map -> object with stringified keys
-                let id = self.reserve();
-                let mut m = Map::new();
-                loop {
-                    self.skip_padding();
-                    if self.peek() == Some(b':') {
-                        self.pos += 1;
-                        self.varint()?;
-                        break;
-                    }
-                    let k = key_string(self.value()?);
-                    let v = self.value()?;
-                    m.insert(k, v);
-                }
-                let v = Value::Object(m);
-                self.objects[id] = v.clone();
-                v
-            }
-            b'\'' => {
-                // Set -> array
-                let id = self.reserve();
-                let mut arr = Vec::new();
-                loop {
-                    self.skip_padding();
-                    if self.peek() == Some(b',') {
-                        self.pos += 1;
-                        self.varint()?;
-                        break;
-                    }
-                    arr.push(self.value()?);
-                }
-                let v = Value::Array(arr);
-                self.objects[id] = v.clone();
-                v
-            }
+            b'A' => self.dense_array()?,
+            b'a' => self.sparse_array()?,
+            b';' => self.map()?,
+            b'\'' => self.set()?,
             b'R' => {
-                let id = self.reserve();
                 let src = self.value()?;
                 self.varint()?; // flags
-                self.objects[id] = src.clone();
                 src
             }
-            other => return self.err(format!("unsupported tag 0x{other:02x} ({:?})", other as char)),
+            _ => unreachable!("value_inner only passes object tags"),
         })
+    }
+
+    fn dense_array(&mut self) -> Result<Value, V8Error> {
+        let len = self.varint_usize()?;
+        let mut arr = Vec::with_capacity(len.min(1 << 20));
+        for _ in 0..len {
+            arr.push(self.value()?);
+        }
+        // Extra named properties may follow before the end tag.
+        let mut extra = Map::new();
+        self.properties(&mut extra, b'$')?;
+        self.varint()?;
+        self.varint()?;
+        Ok(Value::Array(arr))
+    }
+
+    fn sparse_array(&mut self) -> Result<Value, V8Error> {
+        let len = self.varint_usize()?;
+        let mut arr = vec![Value::Null; len.min(1 << 20)];
+        let mut extra = Map::new();
+        self.properties(&mut extra, b'@')?;
+        self.varint()?;
+        self.varint()?;
+        for (k, v) in extra {
+            if let Ok(i) = k.parse::<usize>()
+                && i < arr.len()
+            {
+                arr[i] = v;
+            }
+        }
+        Ok(Value::Array(arr))
+    }
+
+    /// A Map, as an object with stringified keys.
+    fn map(&mut self) -> Result<Value, V8Error> {
+        let mut m = Map::new();
+        loop {
+            self.skip_padding();
+            if self.peek() == Some(b':') {
+                self.pos += 1;
+                self.varint()?;
+                break;
+            }
+            let k = key_string(self.value()?);
+            let v = self.value()?;
+            m.insert(k, v);
+        }
+        Ok(Value::Object(m))
+    }
+
+    /// A Set, as an array.
+    fn set(&mut self) -> Result<Value, V8Error> {
+        let mut arr = Vec::new();
+        loop {
+            self.skip_padding();
+            if self.peek() == Some(b',') {
+                self.pos += 1;
+                self.varint()?;
+                break;
+            }
+            arr.push(self.value()?);
+        }
+        Ok(Value::Array(arr))
     }
 
     /// Read key/value pairs until `end` tag.
@@ -237,19 +278,24 @@ impl Decoder<'_> {
     }
 
     fn latin1(&mut self) -> Result<String, V8Error> {
-        let n = self.varint()? as usize;
+        let n = self.varint_usize()?;
         Ok(self.take(n)?.iter().map(|&c| c as char).collect())
     }
 
     fn utf16(&mut self) -> Result<String, V8Error> {
-        let n = self.varint()? as usize;
+        let n = self.varint_usize()?;
         let raw = self.take(n)?;
-        let units: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
         Ok(String::from_utf16_lossy(&units))
     }
 
     fn utf8(&mut self) -> Result<String, V8Error> {
-        let n = self.varint()? as usize;
+        let n = self.varint_usize()?;
         Ok(String::from_utf8_lossy(self.take(n)?).into_owned())
     }
 
@@ -282,7 +328,9 @@ fn key_string(v: Value) -> String {
 /// JS number to JSON: integral values become integers, NaN/Inf become null.
 fn num(f: f64) -> Value {
     if f.fract() == 0.0 && f.abs() < 9.007_199_254_740_992e15 {
-        Value::from(f as i64)
+        #[expect(clippy::cast_possible_truncation, reason = "integral and below 2^53")]
+        let i = f as i64;
+        Value::from(i)
     } else {
         Number::from_f64(f).map_or(Value::Null, Value::Number)
     }
@@ -307,5 +355,21 @@ mod tests {
     fn two_byte_string() {
         let bytes = [0xFF, 0x0F, b'c', 4, 0x1f, 0x04, 0x40, 0x04];
         assert_eq!(decode(&bytes).unwrap(), json!("Пр"));
+    }
+}
+
+#[cfg(test)]
+mod damaged_input_tests {
+    use super::*;
+
+    #[test]
+    fn deeply_nested_values_are_an_error_not_a_stack_overflow() {
+        // 200,000 nested one-element dense arrays: 'A', length 1, then the element.
+        let mut b = vec![0xFF, 0x0F];
+        for _ in 0..200_000 {
+            b.extend_from_slice(&[b'A', 1]);
+        }
+        let err = decode(&b).expect_err("too deep");
+        assert!(err.msg.contains("nested"), "{err}");
     }
 }

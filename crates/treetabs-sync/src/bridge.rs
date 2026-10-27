@@ -28,6 +28,30 @@ struct Expect {
     since: Instant,
 }
 
+impl Expect {
+    /// A tab opening `url` for `node`, in `window` when known.
+    fn tab(node: NodeId, window: Option<i64>, url: String, since: Instant) -> Self {
+        Expect {
+            node,
+            window,
+            url: Some(url),
+            is_window: false,
+            since,
+        }
+    }
+
+    /// A window opening for `node`.
+    fn window(node: NodeId, since: Instant) -> Self {
+        Expect {
+            node,
+            window: None,
+            url: None,
+            is_window: true,
+            since,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Browser {
     clients: Vec<u64>,
@@ -69,11 +93,20 @@ impl Browser {
     }
 
     fn call_with(&mut self, api: &str, args: Vec<Value>, p: Pending, out: &mut Calls) {
-        let Some(&client) = self.clients.first() else { return };
+        let Some(&client) = self.clients.first() else {
+            return;
+        };
         self.next_req += 1;
         let req = self.next_req;
         self.pending.insert(req, p);
-        out.push((client, ServerMsg::Call { req, api: api.to_owned(), args }));
+        out.push((
+            client,
+            ServerMsg::Call {
+                req,
+                api: api.to_owned(),
+                args,
+            },
+        ));
     }
 
     /// Bookmark calls produced by the mirror, wrapped for sending.
@@ -121,7 +154,13 @@ impl Browser {
         (ops, out)
     }
 
-    pub fn call_result(&mut self, req: u64, ok: Option<Value>, err: Option<String>, tree: &Tree) -> (Vec<Op>, Calls) {
+    pub fn call_result(
+        &mut self,
+        req: u64,
+        ok: Option<Value>,
+        err: Option<String>,
+        tree: &Tree,
+    ) -> (Vec<Op>, Calls) {
         let mut out = Vec::new();
         match self.pending.remove(&req) {
             Some(Pending::Plain(api)) => {
@@ -147,10 +186,14 @@ impl Browser {
     /// If `ev` is the browser carrying out one of our requests, the ops that
     /// bind it to the requesting node (instead of normal event handling).
     pub fn take_expectation(&mut self, ev: &BrowserEvent, tree: &Tree) -> Option<Vec<Op>> {
-        self.expects.retain(|e| e.since.elapsed() < EXPECT_FOR && tree.root.find(e.node).is_some());
+        self.expects
+            .retain(|e| e.since.elapsed() < EXPECT_FOR && tree.root.find(e.node).is_some());
         match ev {
             BrowserEvent::WindowCreated(w) => {
-                let i = self.expects.iter().position(|e| e.is_window && e.window.is_none())?;
+                let i = self
+                    .expects
+                    .iter()
+                    .position(|e| e.is_window && e.window.is_none())?;
                 let e = self.expects.remove(i);
                 let node = tree.root.find(e.node)?;
                 // Later tab expectations of this request belong to this window.
@@ -165,16 +208,30 @@ impl Browser {
                 f.data.remove("closeDate");
                 f.data.remove("crashDetectedDate");
                 // Move a restored window to the top level if it was nested.
-                let mut ops = vec![Op::Update { id: e.node, fields: Box::new(f) }];
-                if tree.root.locate(e.node).is_some_and(|(p, _)| p != tree.root.id) {
-                    ops.push(Op::Move { id: e.node, parent: tree.root.id, index: tree.root.children.len() - 1 });
+                let mut ops = vec![Op::Update {
+                    id: e.node,
+                    fields: Box::new(f),
+                }];
+                if tree
+                    .root
+                    .locate(e.node)
+                    .is_some_and(|(p, _)| p != tree.root.id)
+                {
+                    ops.push(Op::Move {
+                        id: e.node,
+                        parent: tree.root.id,
+                        index: tree.root.children.len() - 1,
+                    });
                 }
                 Some(ops)
             }
             BrowserEvent::TabCreated(t) | BrowserEvent::TabUpdated(t) => {
                 let url = tab_url(t);
                 let i = self.expects.iter().position(|e| {
-                    !e.is_window && e.window.is_none_or(|w| w == t.window_id) && url.is_some() && e.url.as_deref() == url
+                    !e.is_window
+                        && e.window.is_none_or(|w| w == t.window_id)
+                        && url.is_some()
+                        && e.url.as_deref() == url
                 })?;
                 // A TabUpdated for a tab we already track is not ours to bind.
                 if matches!(ev, BrowserEvent::TabUpdated(_)) && tracked_tab(tree, t.id) {
@@ -187,7 +244,10 @@ impl Browser {
                 f.data.insert("id".into(), json!(t.id));
                 f.data.insert("windowId".into(), json!(t.window_id));
                 f.data.remove("crashDetectedDate");
-                Some(vec![Op::Update { id: e.node, fields: Box::new(f) }])
+                Some(vec![Op::Update {
+                    id: e.node,
+                    fields: Box::new(f),
+                }])
             }
             BrowserEvent::TabRemoved { tab_id, .. } if self.closing.remove(tab_id) => {
                 let nid = find_open_tab(tree, *tab_id)?;
@@ -196,7 +256,10 @@ impl Browser {
                 f.kind = NodeKind::SavedTab;
                 f.data.remove("id");
                 f.data.remove("windowId");
-                Some(vec![Op::Update { id: nid, fields: Box::new(f) }])
+                Some(vec![Op::Update {
+                    id: nid,
+                    fields: Box::new(f),
+                }])
             }
             _ => None,
         }
@@ -208,80 +271,118 @@ impl Browser {
         if self.clients.is_empty() {
             return out;
         }
-        let Some(node) = tree.root.find(id) else { return out };
-        let since = Instant::now();
+        let Some(node) = tree.root.find(id) else {
+            return out;
+        };
         match node.kind {
             NodeKind::Tab => {
                 if let (Some(tab), Some(win)) = (int(node, "id"), int(node, "windowId")) {
-                    self.call("tabs.update", vec![json!(tab), json!({"active": true})], &mut out);
-                    self.call("windows.update", vec![json!(win), json!({"focused": true})], &mut out);
+                    self.call(
+                        "tabs.update",
+                        vec![json!(tab), json!({"active": true})],
+                        &mut out,
+                    );
+                    self.focus_window(win, &mut out);
                 }
             }
             NodeKind::Window => {
                 if let Some(win) = int(node, "id") {
-                    self.call("windows.update", vec![json!(win), json!({"focused": true})], &mut out);
+                    self.focus_window(win, &mut out);
                 }
             }
             NodeKind::SavedTab | NodeKind::WaitingTab | NodeKind::AttachWaitingTab => {
-                let Some(url) = node.url.clone() else { return out };
-                match open_window_of(tree, id) {
-                    Some(win) => {
-                        self.expects.push(Expect { node: id, window: Some(win), url: Some(url.clone()), is_window: false, since });
-                        self.call("tabs.create", vec![json!({"windowId": win, "url": url, "active": true})], &mut out);
-                        self.call("windows.update", vec![json!(win), json!({"focused": true})], &mut out);
-                    }
-                    None => {
-                        // Inside a saved window (or none): open a window for it.
-                        if let Some(w) = saved_window_of(tree, id) {
-                            self.expects.push(Expect { node: w, window: None, url: None, is_window: true, since });
-                        }
-                        self.expects.push(Expect { node: id, window: None, url: Some(url.clone()), is_window: false, since });
-                        self.call("windows.create", vec![json!({"url": [url], "focused": true})], &mut out);
-                    }
+                if let Some(url) = node.url.clone() {
+                    self.open_saved_tab(id, url, tree, &mut out);
                 }
             }
             NodeKind::SavedWindow | NodeKind::WaitingWindow | NodeKind::Group => {
-                let mut urls = Vec::new();
-                node.walk(&mut |n, d| {
-                    if d > 0
-                        && matches!(n.kind, NodeKind::SavedTab | NodeKind::WaitingTab | NodeKind::AttachWaitingTab)
-                        && let Some(u) = &n.url
-                    {
-                        urls.push((n.id, u.clone()));
-                    }
-                });
-                if urls.is_empty() {
-                    return out;
-                }
-                if node.kind != NodeKind::Group {
-                    self.expects.push(Expect { node: id, window: None, url: None, is_window: true, since });
-                }
-                for (nid, u) in &urls {
-                    self.expects.push(Expect { node: *nid, window: None, url: Some(u.clone()), is_window: false, since });
-                }
-                let list: Vec<&str> = urls.iter().map(|(_, u)| u.as_str()).collect();
-                let mut create = json!({"url": list, "focused": true});
-                if let Some(r) = node.data.get("rect").and_then(Value::as_str) {
-                    let p: Vec<i64> = r.split('_').filter_map(|x| x.parse().ok()).collect();
-                    if p.len() == 4 {
-                        create["left"] = json!(p[0]);
-                        create["top"] = json!(p[1]);
-                        create["width"] = json!(p[2]);
-                        create["height"] = json!(p[3]);
-                    }
-                }
-                self.call("windows.create", vec![create], &mut out);
+                self.open_saved_window(node, &mut out)
             }
             _ => {}
         }
         out
     }
 
+    fn focus_window(&mut self, win: i64, out: &mut Calls) {
+        self.call(
+            "windows.update",
+            vec![json!(win), json!({"focused": true})],
+            out,
+        );
+    }
+
+    /// A saved tab: opened in its open window, or in a new window when it
+    /// sits in a saved one (or in none).
+    fn open_saved_tab(&mut self, id: NodeId, url: String, tree: &Tree, out: &mut Calls) {
+        let since = Instant::now();
+        if let Some(win) = open_window_of(tree, id) {
+            self.expects
+                .push(Expect::tab(id, Some(win), url.clone(), since));
+            self.call(
+                "tabs.create",
+                vec![json!({"windowId": win, "url": url, "active": true})],
+                out,
+            );
+            self.focus_window(win, out);
+            return;
+        }
+        if let Some(w) = saved_window_of(tree, id) {
+            self.expects.push(Expect::window(w, since));
+        }
+        self.expects.push(Expect::tab(id, None, url.clone(), since));
+        self.call(
+            "windows.create",
+            vec![json!({"url": [url], "focused": true})],
+            out,
+        );
+    }
+
+    /// A saved window or a group: all its saved tabs in one new window, at
+    /// the window's old place and size when known.
+    fn open_saved_window(&mut self, node: &Node, out: &mut Calls) {
+        let since = Instant::now();
+        let mut urls = Vec::new();
+        node.walk(&mut |n, d| {
+            if d > 0
+                && matches!(
+                    n.kind,
+                    NodeKind::SavedTab | NodeKind::WaitingTab | NodeKind::AttachWaitingTab
+                )
+                && let Some(u) = &n.url
+            {
+                urls.push((n.id, u.clone()));
+            }
+        });
+        if urls.is_empty() {
+            return;
+        }
+        if node.kind != NodeKind::Group {
+            self.expects.push(Expect::window(node.id, since));
+        }
+        for (nid, u) in &urls {
+            self.expects.push(Expect::tab(*nid, None, u.clone(), since));
+        }
+        let list: Vec<&str> = urls.iter().map(|(_, u)| u.as_str()).collect();
+        let mut create = json!({"url": list, "focused": true});
+        if let Some(r) = node.data.get("rect").and_then(Value::as_str) {
+            let p: Vec<i64> = r.split('_').filter_map(|x| x.parse().ok()).collect();
+            if let [left, top, width, height] = p[..] {
+                create["left"] = json!(left);
+                create["top"] = json!(top);
+                create["width"] = json!(width);
+                create["height"] = json!(height);
+            }
+        }
+        self.call("windows.create", vec![create], out);
+    }
+
     /// Close open tabs/windows, keeping their nodes as saved.
     pub fn close(&mut self, ids: &[NodeId], tree: &Tree) -> Calls {
         let mut out = Vec::new();
         for &id in ids {
-            let Some(n) = tree.root.find(id) else { continue };
+            let Some(n) = tree.root.find(id) else {
+                continue;
+            };
             match n.kind {
                 NodeKind::Tab => {
                     if let Some(tab) = int(n, "id") {
@@ -354,7 +455,9 @@ impl Browser {
     /// tree has them (order of open tabs in the window, depth first), so
     /// the browser's move events then find them already in place.
     fn follow_move(&mut self, id: NodeId, tree: &Tree, out: &mut Calls) {
-        let Some(moved) = tree.root.find(id) else { return };
+        let Some(moved) = tree.root.find(id) else {
+            return;
+        };
         let mut tabs = Vec::new();
         moved.walk(&mut |n, _| {
             if n.kind == NodeKind::Tab
@@ -389,8 +492,14 @@ impl Browser {
                 order.push(t);
             }
         });
-        let Some(index) = order.iter().position(|&t| t == tabs[0]) else { return };
-        self.call("tabs.move", vec![json!(tabs), json!({"windowId": wid, "index": index})], out);
+        let Some(index) = order.iter().position(|&t| t == tabs[0]) else {
+            return;
+        };
+        self.call(
+            "tabs.move",
+            vec![json!(tabs), json!({"windowId": wid, "index": index})],
+            out,
+        );
     }
 }
 
@@ -399,7 +508,10 @@ fn int(n: &Node, k: &str) -> Option<i64> {
 }
 
 fn tab_url(t: &BrowserTab) -> Option<&str> {
-    t.url.as_deref().filter(|u| !u.is_empty()).or(t.pending_url.as_deref())
+    t.url
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .or(t.pending_url.as_deref())
 }
 
 fn tracked_tab(tree: &Tree, tab_id: i64) -> bool {
@@ -407,12 +519,19 @@ fn tracked_tab(tree: &Tree, tab_id: i64) -> bool {
 }
 
 fn find_open_tab(tree: &Tree, tab_id: i64) -> Option<NodeId> {
-    tree.root.find_by(|n| n.kind == NodeKind::Tab && int(n, "id") == Some(tab_id)).map(|n| n.id)
+    tree.root
+        .find_by(|n| n.kind == NodeKind::Tab && int(n, "id") == Some(tab_id))
+        .map(|n| n.id)
 }
 
 /// Browser id of the open window containing `id`.
 fn open_window_of(tree: &Tree, id: NodeId) -> Option<i64> {
-    tree.root.children.iter().find(|w| w.contains(id)).filter(|w| w.kind == NodeKind::Window).and_then(|w| int(w, "id"))
+    tree.root
+        .children
+        .iter()
+        .find(|w| w.contains(id))
+        .filter(|w| w.kind == NodeKind::Window)
+        .and_then(|w| int(w, "id"))
 }
 
 fn saved_window_of(tree: &Tree, id: NodeId) -> Option<NodeId> {

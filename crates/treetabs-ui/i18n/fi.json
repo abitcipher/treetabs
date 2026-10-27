@@ -169,6 +169,7 @@
  "{n} browser(s) connected": "Yhdistettyjä selaimia: {n}",
  "{n} days": "{n} päivää",
  "{n} match(es); double-click opens in the browser": "Osumia: {n}; kaksoisnapsautus avaa selaimessa",
+ "{n} nodes selected": "Valittu {n} kohdetta",
  "{title}: {n} nodes added at the end": "{title}: loppuun lisätty {n} kohdetta",
  "{title}: {n} nodes added at the end ({warnings} warnings)": "{title}: loppuun lisätty {n} kohdetta ({warnings} varoitusta)"
 }

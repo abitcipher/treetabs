@@ -2,10 +2,13 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use treetabs_core::{idb, tabs_outliner};
+use treetabs_core::{JsonStyle, idb, tabs_outliner};
 
 #[derive(Parser)]
-#[command(name = "treetabs", about = "Read Tabs Outliner data and convert it to portable JSON")]
+#[command(
+    name = "treetabs",
+    about = "Read Tabs Outliner data and convert it to portable JSON"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -152,16 +155,46 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Convert { input, output, format, pretty } => convert(&input, output.as_deref(), format, pretty),
+        Cmd::Convert {
+            input,
+            output,
+            format,
+            pretty,
+        } => {
+            let style = if pretty {
+                JsonStyle::Pretty
+            } else {
+                JsonStyle::Compact
+            };
+            convert(&input, output.as_deref(), format, style)
+        }
         Cmd::Info { input } => info(&input),
         Cmd::IdbDump { dir, values } => idb_dump(&dir, values),
-        Cmd::InstallHost { browser, user_data_dir, host, store, set_default, extension_ids, firefox_ids } => {
-            install_host(browser, user_data_dir, host, store, set_default, extension_ids, firefox_ids)
-        }
+        Cmd::InstallHost {
+            browser,
+            user_data_dir,
+            host,
+            store,
+            set_default,
+            extension_ids,
+            firefox_ids,
+        } => install_host(
+            browser,
+            user_data_dir,
+            host,
+            store,
+            set_default,
+            extension_ids,
+            firefox_ids,
+        ),
         Cmd::Import { input, store } => import(&input, store),
         Cmd::Live { store, json } => live(store, json),
         Cmd::Open { id, store } => open(id, store),
-        Cmd::Revert { from_seq, store, apply } => revert(from_seq, store, apply),
+        Cmd::Revert {
+            from_seq,
+            store,
+            apply,
+        } => revert(from_seq, store, apply),
         Cmd::Serve { store } => {
             let dir = store.unwrap_or_else(treetabs_sync::config::store_dir);
             let _server = treetabs_sync::server::start(&dir)?;
@@ -170,12 +203,18 @@ fn main() -> Result<()> {
                 std::thread::park();
             }
         }
-        Cmd::History { dir, recover, extract, output } => history(&dir, recover.as_deref(), extract, output.as_deref()),
+        Cmd::History {
+            dir,
+            recover,
+            extract,
+            output,
+        } => history(&dir, recover.as_deref(), extract, output.as_deref()),
     }
 }
 
 fn load(input: &Path) -> Result<treetabs_core::Loaded> {
-    let loaded = treetabs_core::load(input).with_context(|| format!("reading {}", input.display()))?;
+    let loaded =
+        treetabs_core::load(input).with_context(|| format!("reading {}", input.display()))?;
     if !loaded.warnings.is_empty() {
         eprintln!("{} warning(s):", loaded.warnings.len());
         for w in loaded.warnings.iter().take(20) {
@@ -188,13 +227,18 @@ fn load(input: &Path) -> Result<treetabs_core::Loaded> {
     Ok(loaded)
 }
 
-fn convert(input: &Path, output: Option<&Path>, format: OutFormat, pretty: bool) -> Result<()> {
+fn convert(input: &Path, output: Option<&Path>, format: OutFormat, style: JsonStyle) -> Result<()> {
+    let pretty = style == JsonStyle::Pretty;
     let loaded = load(input)?;
     let text = match format {
-        OutFormat::Portable => treetabs_core::to_portable_json(&loaded.tree, pretty)?,
+        OutFormat::Portable => treetabs_core::to_portable_json(&loaded.tree, style)?,
         OutFormat::TabsOutliner => {
             let v = tabs_outliner::to_value(&loaded.tree);
-            if pretty { serde_json::to_string_pretty(&v)? } else { serde_json::to_string(&v)? }
+            if pretty {
+                serde_json::to_string_pretty(&v)?
+            } else {
+                serde_json::to_string(&v)?
+            }
         }
     };
     match output {
@@ -215,7 +259,10 @@ fn info(input: &Path) -> Result<()> {
     let t = &loaded.tree;
     println!("source:   {:?}", loaded.format);
     println!("tree id:  {}", t.tree_id.as_deref().unwrap_or("-"));
-    println!("saved at: {}", t.saved_at.map_or("-".into(), |v| v.to_string()));
+    println!(
+        "saved at: {}",
+        t.saved_at.map_or("-".into(), |v| v.to_string())
+    );
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut max_depth = 0;
     t.root.walk(&mut |n, d| {
@@ -259,14 +306,22 @@ fn idb_dump(dir: &Path, values: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-fn history(dir: &Path, recover: Option<&Path>, extract: Option<usize>, output: Option<&Path>) -> Result<()> {
+fn history(
+    dir: &Path,
+    recover: Option<&Path>,
+    extract: Option<usize>,
+    output: Option<&Path>,
+) -> Result<()> {
     use treetabs_core::recover::{lost_tabs, tab_urls};
     let versions = idb::snapshot_history(dir)?;
     let Some(current) = versions.iter().find_map(|v| v.tree.as_ref().ok()) else {
         bail!("no readable snapshot version found");
     };
     let current_urls = tab_urls(current);
-    println!("{:>3}  {:>12}  {:>8}  {:>6}  {:>13}  missing-now", "#", "seq", "nodes", "tabs", "saved_at");
+    println!(
+        "{:>3}  {:>12}  {:>8}  {:>6}  {:>13}  missing-now",
+        "#", "seq", "nodes", "tabs", "saved_at"
+    );
     for (i, v) in versions.iter().enumerate() {
         match &v.tree {
             Ok(t) => {
@@ -286,15 +341,24 @@ fn history(dir: &Path, recover: Option<&Path>, extract: Option<usize>, output: O
     }
     if let Some(n) = extract {
         let v = versions.get(n).with_context(|| format!("no version {n}"))?;
-        let t = v.tree.as_ref().map_err(|e| anyhow::anyhow!("version {n} unreadable: {e}"))?;
+        let t = v
+            .tree
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("version {n} unreadable: {e}"))?;
         let out = output.expect("clap requires output");
-        treetabs_core::save_portable(t, out, true)?;
+        treetabs_core::save_portable(t, out, JsonStyle::Pretty)?;
         eprintln!("wrote version {n} to {}", out.display());
     }
     if let Some(out) = recover {
-        let older = versions.iter().filter(|v| !v.is_current).filter_map(|v| v.tree.as_ref().ok());
+        let older = versions
+            .iter()
+            .filter(|v| !v.is_current)
+            .filter_map(|v| v.tree.as_ref().ok());
         let found = lost_tabs(current, older, |_, t| {
-            format!("Recovered (version saved {})", t.saved_at.map_or("?".into(), |s| s.to_string()))
+            format!(
+                "Recovered (version saved {})",
+                t.saved_at.map_or("?".into(), |s| s.to_string())
+            )
         });
         let n: usize = found.iter().map(|w| w.children.len()).sum();
         let mut tree = current.clone();
@@ -304,8 +368,11 @@ fn history(dir: &Path, recover: Option<&Path>, extract: Option<usize>, output: O
         if n > 0 {
             tree.root.children.push(group);
         }
-        treetabs_core::save_portable(&tree, out, true)?;
-        eprintln!("recovered {n} tab(s) missing from the current tree; wrote {}", out.display());
+        treetabs_core::save_portable(&tree, out, JsonStyle::Pretty)?;
+        eprintln!(
+            "recovered {n} tab(s) missing from the current tree; wrote {}",
+            out.display()
+        );
     }
     Ok(())
 }
@@ -316,7 +383,9 @@ const EXTENSION_ID: &str = "ipglemijkiaehilbokjjppicafjcbcbg";
 const FIREFOX_ID: &str = "treetabs@treetabs.dev";
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).expect("HOME is set")
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .expect("HOME is set")
 }
 
 fn install_host(
@@ -328,13 +397,24 @@ fn install_host(
     extension_ids: Vec<String>,
     firefox_ids: Vec<String>,
 ) -> Result<()> {
-    let extension_ids = if extension_ids.is_empty() { vec![EXTENSION_ID.to_owned()] } else { extension_ids };
-    let firefox_ids = if firefox_ids.is_empty() { vec![FIREFOX_ID.to_owned()] } else { firefox_ids };
+    let extension_ids = if extension_ids.is_empty() {
+        vec![EXTENSION_ID.to_owned()]
+    } else {
+        extension_ids
+    };
+    let firefox_ids = if firefox_ids.is_empty() {
+        vec![FIREFOX_ID.to_owned()]
+    } else {
+        firefox_ids
+    };
     use treetabs_sync::config::{Config, host_config_path, store_dir, user_config_path};
     let exe = std::env::current_exe()?;
     let mut host = host.unwrap_or_else(|| exe.with_file_name("treetabs-host"));
     if !host.exists() {
-        bail!("host binary {} not found (cargo build -p treetabs-sync)", host.display());
+        bail!(
+            "host binary {} not found (cargo build -p treetabs-sync)",
+            host.display()
+        );
     }
     host = host.canonicalize()?;
     let mut store = store.unwrap_or_else(store_dir);
@@ -357,14 +437,21 @@ fn install_host(
     let hosts_dir = match (user_data_dir, browser) {
         (Some(d), _) => d.join("NativeMessagingHosts"),
         (None, BrowserKind::Chromium) => home().join(".config/chromium/NativeMessagingHosts"),
-        (None, BrowserKind::ChromiumSnap) => home().join("snap/chromium/common/chromium/NativeMessagingHosts"),
+        (None, BrowserKind::ChromiumSnap) => {
+            home().join("snap/chromium/common/chromium/NativeMessagingHosts")
+        }
         (None, BrowserKind::Chrome) => home().join(".config/google-chrome/NativeMessagingHosts"),
-        (None, BrowserKind::Brave) => home().join(".config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+        (None, BrowserKind::Brave) => {
+            home().join(".config/BraveSoftware/Brave-Browser/NativeMessagingHosts")
+        }
         // The snap's own home; Brave ignores --user-data-dir for hosts.
-        (None, BrowserKind::BraveSnap) => home().join("snap/brave/current/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+        (None, BrowserKind::BraveSnap) => home()
+            .join("snap/brave/current/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
         // Opera reads Chrome's location (not its own config folder).
         (None, BrowserKind::Opera) => home().join(".config/google-chrome/NativeMessagingHosts"),
-        (None, BrowserKind::OperaSnap) => home().join("snap/opera/current/.config/google-chrome/NativeMessagingHosts"),
+        (None, BrowserKind::OperaSnap) => {
+            home().join("snap/opera/current/.config/google-chrome/NativeMessagingHosts")
+        }
         // Read by Firefox, and by the portal for the snap.
         (None, BrowserKind::Firefox) => home().join(".mozilla/native-messaging-hosts"),
     };
@@ -387,7 +474,9 @@ fn install_host(
     };
     let mpath = hosts_dir.join(format!("{HOST_NAME}.json"));
     std::fs::write(&mpath, serde_json::to_vec_pretty(&manifest)?)?;
-    let cfg = Config { store_dir: Some(store.clone()) };
+    let cfg = Config {
+        store_dir: Some(store.clone()),
+    };
     std::fs::write(host_config_path(&host), serde_json::to_vec_pretty(&cfg)?)?;
     println!("host manifest: {}", mpath.display());
     println!("host binary:   {}", host.display());
@@ -405,7 +494,8 @@ fn import(input: &Path, store: Option<PathBuf>) -> Result<()> {
     let loaded = load(input)?;
     let dir = store.unwrap_or_else(treetabs_sync::config::store_dir);
     let n = loaded.tree.count() - 1;
-    treetabs_core::Store::create(&dir, loaded.tree).with_context(|| format!("creating store in {}", dir.display()))?;
+    treetabs_core::Store::create(&dir, loaded.tree)
+        .with_context(|| format!("creating store in {}", dir.display()))?;
     eprintln!("imported {n} nodes into {}", dir.display());
     Ok(())
 }
@@ -421,15 +511,27 @@ fn live(store: Option<PathBuf>, json: bool) -> Result<()> {
         }
     };
     if json {
-        println!("{}", treetabs_core::to_portable_json(&tree, true)?);
+        println!(
+            "{}",
+            treetabs_core::to_portable_json(&tree, JsonStyle::Pretty)?
+        );
         return Ok(());
     }
     tree.root.walk(&mut |n, d| {
         if d == 0 {
             return;
         }
-        let url = n.url.as_deref().map(|u| format!("  <{u}>")).unwrap_or_default();
-        println!("{}{} {}{url}", "  ".repeat(d - 1), n.kind, n.display_title());
+        let url = n
+            .url
+            .as_deref()
+            .map(|u| format!("  <{u}>"))
+            .unwrap_or_default();
+        println!(
+            "{}{} {}{url}",
+            "  ".repeat(d - 1),
+            n.kind,
+            n.display_title()
+        );
     });
     if !tree.trash.is_empty() {
         println!("(trash: {} item(s))", tree.trash.len());
@@ -465,7 +567,9 @@ fn open(id: u64, store: Option<PathBuf>) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
     };
-    conn.send(&ClientMsg::Activate { id: treetabs_core::NodeId(id) })?;
+    conn.send(&ClientMsg::Activate {
+        id: treetabs_core::NodeId(id),
+    })?;
     // Give the server a moment to read it before we hang up.
     std::thread::sleep(std::time::Duration::from_millis(300));
     Ok(())
@@ -476,7 +580,8 @@ fn revert(from: u64, store: Option<PathBuf>, apply: bool) -> Result<()> {
     use treetabs_core::store::JournalEntry;
     use treetabs_sync::{ClientMsg, Role, ServerMsg};
     let dir = store.unwrap_or_else(treetabs_sync::config::store_dir);
-    let mut tree: treetabs_core::Tree = serde_json::from_slice(&std::fs::read(dir.join("tree.json"))?)?;
+    let mut tree: treetabs_core::Tree =
+        serde_json::from_slice(&std::fs::read(dir.join("tree.json"))?)?;
     let base = tree.journal_seq.unwrap_or(0);
     if from <= base {
         bail!("entry {from} is already part of the snapshot (journal starts after {base})");
@@ -495,20 +600,28 @@ fn revert(from: u64, store: Option<PathBuf>, apply: bool) -> Result<()> {
         }
         last = e.seq;
         if e.seq < from {
-            tree.apply(&e.op).map_err(|err| anyhow::anyhow!("replaying {}: {err}", e.seq))?;
+            tree.apply(&e.op)
+                .map_err(|err| anyhow::anyhow!("replaying {}: {err}", e.seq))?;
         } else {
             later.push(e);
         }
     }
     let mut inverse = Vec::new();
     for e in &later {
-        match tree.apply(&e.op).map_err(|err| anyhow::anyhow!("replaying {}: {err}", e.seq))? {
+        match tree
+            .apply(&e.op)
+            .map_err(|err| anyhow::anyhow!("replaying {}: {err}", e.seq))?
+        {
             Some(inv) => inverse.push(inv),
             None => bail!("entry {} ({}) cannot be undone", e.seq, e.op.name()),
         }
     }
     inverse.reverse();
-    eprintln!("{} entries ({from}..={last}) -> {} inverse ops", later.len(), inverse.len());
+    eprintln!(
+        "{} entries ({from}..={last}) -> {} inverse ops",
+        later.len(),
+        inverse.len()
+    );
     if !apply {
         eprintln!("dry run; add --apply to send them");
         return Ok(());
@@ -517,14 +630,21 @@ fn revert(from: u64, store: Option<PathBuf>, apply: bool) -> Result<()> {
     // Make sure nothing happened after what we read.
     loop {
         match conn.rx.recv_timeout(std::time::Duration::from_secs(10))? {
-            ServerMsg::Snapshot { seq, .. } if seq != last => bail!("store moved on (seq {seq}, read {last}); run again"),
+            ServerMsg::Snapshot { seq, .. } if seq != last => {
+                bail!("store moved on (seq {seq}, read {last}); run again")
+            }
             ServerMsg::Snapshot { .. } => break,
             _ => {}
         }
     }
-    conn.send(&ClientMsg::Edit { req: 1, ops: inverse })?;
+    conn.send(&ClientMsg::Edit {
+        req: 1,
+        ops: inverse,
+    })?;
     loop {
-        if let ServerMsg::EditResult { err, .. } = conn.rx.recv_timeout(std::time::Duration::from_secs(10))? {
+        if let ServerMsg::EditResult { err, .. } =
+            conn.rx.recv_timeout(std::time::Duration::from_secs(10))?
+        {
             match err {
                 Some(e) => bail!("server refused: {e}"),
                 None => {

@@ -67,17 +67,29 @@ impl Node {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     /// Insert a new subtree. All ids in it must be new.
-    Insert { parent: NodeId, index: usize, node: Box<Node> },
+    Insert {
+        parent: NodeId,
+        index: usize,
+        node: Box<Node>,
+    },
     /// Remove a subtree for good. Only used to undo an `Insert`.
     Delete { id: NodeId },
     /// Move a subtree. `index` is counted after the node is taken out.
-    Move { id: NodeId, parent: NodeId, index: usize },
+    Move {
+        id: NodeId,
+        parent: NodeId,
+        index: usize,
+    },
     /// Replace a node's fields (not its children).
     Update { id: NodeId, fields: Box<NodeFields> },
     /// Move a subtree into the trash.
     Trash { id: NodeId, at: i64 },
     /// Put a trashed subtree back.
-    Restore { id: NodeId, parent: NodeId, index: usize },
+    Restore {
+        id: NodeId,
+        parent: NodeId,
+        index: usize,
+    },
     /// Drop trash items removed before `before` (ms). Cannot be undone.
     PurgeTrash { before: i64 },
 }
@@ -100,77 +112,143 @@ impl Op {
 impl Tree {
     /// Apply `op`. On success returns the op that undoes it (`None` for ops
     /// that cannot be undone). On error the tree is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// When the op does not fit the tree (unknown id, id already used, index
+    /// out of range, moving into itself); the tree is then unchanged.
     pub fn apply(&mut self, op: &Op) -> Result<Option<Op>, EditError> {
         match op {
-            Op::Insert { parent, index, node } => {
-                let mut clash = None;
-                node.walk(&mut |n, _| {
-                    if clash.is_none() && (self.root.find(n.id).is_some() || self.trash_index(n.id).is_some()) {
-                        clash = Some(n.id);
-                    }
-                });
-                if let Some(id) = clash {
-                    return Err(EditError::DuplicateId(id));
-                }
-                let p = self.root.find_mut(*parent).ok_or(EditError::NotFound(*parent))?;
-                if *index > p.children.len() {
-                    return Err(EditError::BadIndex { index: *index, len: p.children.len() });
-                }
-                p.children.insert(*index, (**node).clone());
-                node.walk(&mut |n, _| NodeId::bump_above(n.id));
-                Ok(Some(Op::Delete { id: node.id }))
-            }
+            Op::Insert {
+                parent,
+                index,
+                node,
+            } => self.insert(*parent, *index, node),
             Op::Delete { id } => {
                 let (parent, index) = self.locate_checked(*id)?;
                 let node = self.root.remove(*id).ok_or(EditError::NotFound(*id))?;
-                Ok(Some(Op::Insert { parent, index, node: Box::new(node) }))
+                Ok(Some(Op::Insert {
+                    parent,
+                    index,
+                    node: Box::new(node),
+                }))
             }
-            Op::Move { id, parent, index } => {
-                let (old_parent, old_index) = self.locate_checked(*id)?;
-                let moving = self.root.find(*id).ok_or(EditError::NotFound(*id))?;
-                if moving.contains(*parent) {
-                    return Err(EditError::IntoSelf);
-                }
-                let new_len = {
-                    let p = self.root.find(*parent).ok_or(EditError::NotFound(*parent))?;
-                    p.children.len() - usize::from(old_parent == *parent)
-                };
-                if *index > new_len {
-                    return Err(EditError::BadIndex { index: *index, len: new_len });
-                }
-                let node = self.root.remove(*id).expect("located above");
-                let p = self.root.find_mut(*parent).expect("checked above");
-                p.children.insert(*index, node);
-                Ok(Some(Op::Move { id: *id, parent: old_parent, index: old_index }))
-            }
+            Op::Move { id, parent, index } => self.move_node(*id, *parent, *index),
             Op::Update { id, fields } => {
                 let n = self.root.find_mut(*id).ok_or(EditError::NotFound(*id))?;
                 let old = n.fields();
                 n.set_fields((**fields).clone());
-                Ok(Some(Op::Update { id: *id, fields: Box::new(old) }))
+                Ok(Some(Op::Update {
+                    id: *id,
+                    fields: Box::new(old),
+                }))
             }
             Op::Trash { id, at } => {
                 let (parent, index) = self.locate_checked(*id)?;
                 let node = self.root.remove(*id).expect("located above");
-                self.trash.push(TrashItem { removed_at: *at, parent, index, node });
-                Ok(Some(Op::Restore { id: *id, parent, index }))
+                self.trash.push(TrashItem {
+                    removed_at: *at,
+                    parent,
+                    index,
+                    node,
+                });
+                Ok(Some(Op::Restore {
+                    id: *id,
+                    parent,
+                    index,
+                }))
             }
-            Op::Restore { id, parent, index } => {
-                let ti = self.trash_index(*id).ok_or(EditError::NotFound(*id))?;
-                let p = self.root.find_mut(*parent).ok_or(EditError::NotFound(*parent))?;
-                if *index > p.children.len() {
-                    return Err(EditError::BadIndex { index: *index, len: p.children.len() });
-                }
-                let item = self.trash.remove(ti);
-                let at = item.removed_at;
-                p.children.insert(*index, item.node);
-                Ok(Some(Op::Trash { id: *id, at }))
-            }
+            Op::Restore { id, parent, index } => self.restore(*id, *parent, *index),
             Op::PurgeTrash { before } => {
                 self.trash.retain(|t| t.removed_at >= *before);
                 Ok(None)
             }
         }
+    }
+
+    fn insert(
+        &mut self,
+        parent: NodeId,
+        index: usize,
+        node: &Node,
+    ) -> Result<Option<Op>, EditError> {
+        let mut clash = None;
+        node.walk(&mut |n, _| {
+            if clash.is_none()
+                && (self.root.find(n.id).is_some() || self.trash_index(n.id).is_some())
+            {
+                clash = Some(n.id);
+            }
+        });
+        if let Some(id) = clash {
+            return Err(EditError::DuplicateId(id));
+        }
+        let p = self
+            .root
+            .find_mut(parent)
+            .ok_or(EditError::NotFound(parent))?;
+        if index > p.children.len() {
+            return Err(EditError::BadIndex {
+                index,
+                len: p.children.len(),
+            });
+        }
+        p.children.insert(index, node.clone());
+        node.walk(&mut |n, _| NodeId::bump_above(n.id));
+        Ok(Some(Op::Delete { id: node.id }))
+    }
+
+    fn move_node(
+        &mut self,
+        id: NodeId,
+        parent: NodeId,
+        index: usize,
+    ) -> Result<Option<Op>, EditError> {
+        let (old_parent, old_index) = self.locate_checked(id)?;
+        let moving = self.root.find(id).ok_or(EditError::NotFound(id))?;
+        if moving.contains(parent) {
+            return Err(EditError::IntoSelf);
+        }
+        let p = self.root.find(parent).ok_or(EditError::NotFound(parent))?;
+        // The index counts the siblings after the node is taken out.
+        let new_len = p.children.len() - usize::from(old_parent == parent);
+        if index > new_len {
+            return Err(EditError::BadIndex {
+                index,
+                len: new_len,
+            });
+        }
+        let node = self.root.remove(id).expect("located above");
+        let p = self.root.find_mut(parent).expect("checked above");
+        p.children.insert(index, node);
+        Ok(Some(Op::Move {
+            id,
+            parent: old_parent,
+            index: old_index,
+        }))
+    }
+
+    fn restore(
+        &mut self,
+        id: NodeId,
+        parent: NodeId,
+        index: usize,
+    ) -> Result<Option<Op>, EditError> {
+        let ti = self.trash_index(id).ok_or(EditError::NotFound(id))?;
+        let p = self
+            .root
+            .find_mut(parent)
+            .ok_or(EditError::NotFound(parent))?;
+        if index > p.children.len() {
+            return Err(EditError::BadIndex {
+                index,
+                len: p.children.len(),
+            });
+        }
+        let item = self.trash.remove(ti);
+        let at = item.removed_at;
+        p.children.insert(index, item.node);
+        Ok(Some(Op::Trash { id, at }))
     }
 
     /// Position of a trashed subtree (by its root id).
@@ -197,7 +275,7 @@ pub fn now_ms() -> i64 {
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
@@ -227,10 +305,29 @@ mod tests {
 
         let mut undo = Vec::new();
         let ops = vec![
-            Op::Insert { parent: root, index: 0, node: Box::new(w) },
-            Op::Insert { parent: wid, index: 1, node: Box::new(tab("b")) },
-            Op::Move { id: aid, parent: root, index: 1 },
-            Op::Update { id: aid, fields: Box::new({ let mut f = tab("x").fields(); f.collapsed = true; f }) },
+            Op::Insert {
+                parent: root,
+                index: 0,
+                node: Box::new(w),
+            },
+            Op::Insert {
+                parent: wid,
+                index: 1,
+                node: Box::new(tab("b")),
+            },
+            Op::Move {
+                id: aid,
+                parent: root,
+                index: 1,
+            },
+            Op::Update {
+                id: aid,
+                fields: Box::new({
+                    let mut f = tab("x").fields();
+                    f.collapsed = true;
+                    f
+                }),
+            },
             Op::Trash { id: aid, at: 5 },
         ];
         for op in &ops {
@@ -248,21 +345,54 @@ mod tests {
         let mut t = Tree::default();
         let a = tab("a");
         let aid = a.id;
-        t.apply(&Op::Insert { parent: t.root.id, index: 0, node: Box::new(a.clone()) }).unwrap();
+        t.apply(&Op::Insert {
+            parent: t.root.id,
+            index: 0,
+            node: Box::new(a.clone()),
+        })
+        .unwrap();
         let before = snapshot(&t);
         assert!(matches!(
-            t.apply(&Op::Insert { parent: t.root.id, index: 0, node: Box::new(a) }),
+            t.apply(&Op::Insert {
+                parent: t.root.id,
+                index: 0,
+                node: Box::new(a)
+            }),
             Err(EditError::DuplicateId(_))
         ));
-        assert!(t.apply(&Op::Move { id: aid, parent: t.root.id, index: 5 }).is_err());
-        assert!(t.apply(&Op::Move { id: aid, parent: aid, index: 0 }).is_err());
-        assert!(t.apply(&Op::Trash { id: t.root.id, at: 0 }).is_err());
+        assert!(
+            t.apply(&Op::Move {
+                id: aid,
+                parent: t.root.id,
+                index: 5
+            })
+            .is_err()
+        );
+        assert!(
+            t.apply(&Op::Move {
+                id: aid,
+                parent: aid,
+                index: 0
+            })
+            .is_err()
+        );
+        assert!(
+            t.apply(&Op::Trash {
+                id: t.root.id,
+                at: 0
+            })
+            .is_err()
+        );
         assert_eq!(snapshot(&t), before);
     }
 
     #[test]
     fn op_json_shape() {
-        let op = Op::Move { id: NodeId(3), parent: NodeId(1), index: 2 };
+        let op = Op::Move {
+            id: NodeId(3),
+            parent: NodeId(1),
+            index: 2,
+        };
         assert_eq!(
             serde_json::to_value(&op).unwrap(),
             serde_json::json!({"op": "move", "id": 3, "parent": 1, "index": 2})

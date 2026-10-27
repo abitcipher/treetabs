@@ -66,7 +66,9 @@ impl Store {
         if let Some(d) = std::env::var_os("XDG_DATA_HOME") {
             return PathBuf::from(d).join("treetabs");
         }
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into());
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ".".into());
         home.join(".local/share/treetabs")
     }
 
@@ -83,6 +85,11 @@ impl Store {
     }
 
     /// Create a store from `tree`. Fails if the store already has a tree.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Exists`] when `dir` already holds a tree,
+    /// [`StoreError::Locked`] when another process has it open, or an I/O error.
     pub fn create(dir: &Path, mut tree: Tree) -> Result<Store, StoreError> {
         fs::create_dir_all(dir)?;
         let lock = lock(dir)?;
@@ -98,6 +105,12 @@ impl Store {
     }
 
     /// Open (or create empty) the store in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Locked`] when another process has the store open, an I/O
+    /// error, or a damaged `tree.json` (damaged journal lines are skipped and
+    /// reported in `warnings`).
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         fs::create_dir_all(dir)?;
         let lock = lock(dir)?;
@@ -107,13 +120,18 @@ impl Store {
             serde_json::from_slice(&fs::read(&snap)?)?
         } else {
             // Write the empty tree right away: journal ops refer to its root id.
-            let t = Tree { journal_seq: Some(0), ..Default::default() };
+            let t = Tree {
+                journal_seq: Some(0),
+                ..Default::default()
+            };
             write_atomic(&snap, &serde_json::to_vec(&t)?)?;
             t
         };
         let fixed = tree.fix_ids();
         if fixed > 0 {
-            warnings.push(format!("{fixed} duplicate node id(s) in snapshot were renumbered"));
+            warnings.push(format!(
+                "{fixed} duplicate node id(s) in snapshot were renumbered"
+            ));
         }
         let base = tree.journal_seq.unwrap_or(0);
         let mut seq = base;
@@ -145,7 +163,11 @@ impl Store {
                 }
                 if let Err(e) = tree.apply(&entry.op) {
                     // Keep going: one bad op must not hide all later changes.
-                    warnings.push(format!("journal seq {}: {} skipped: {e}", entry.seq, entry.op.name()));
+                    warnings.push(format!(
+                        "journal seq {}: {} skipped: {e}",
+                        entry.seq,
+                        entry.op.name()
+                    ));
                 }
                 seq = seq.max(entry.seq);
                 since += 1;
@@ -176,6 +198,10 @@ impl Store {
     }
 
     /// Apply one op and write it to disk. Returns the inverse op.
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::apply_batch`].
     pub fn apply(&mut self, op: Op) -> Result<Option<Op>, StoreError> {
         let mut inv = self.apply_batch(vec![op])?;
         Ok(inv.pop().flatten())
@@ -183,6 +209,11 @@ impl Store {
 
     /// Apply ops in order, all or nothing, with one fsync. Returns inverses
     /// in the same order.
+    ///
+    /// # Errors
+    ///
+    /// When an op does not fit the tree (nothing is applied then), or the
+    /// journal cannot be written.
     pub fn apply_batch(&mut self, ops: Vec<Op>) -> Result<Vec<Option<Op>>, StoreError> {
         let mut inverses = Vec::with_capacity(ops.len());
         for (i, op) in ops.iter().enumerate() {
@@ -198,12 +229,20 @@ impl Store {
         let at = now_ms();
         let mut buf = Vec::new();
         for (k, op) in ops.into_iter().enumerate() {
-            let entry = JournalEntry { seq: self.seq + 1 + k as u64, at, op };
+            let entry = JournalEntry {
+                seq: self.seq + 1 + k as u64,
+                at,
+                op,
+            };
             serde_json::to_writer(&mut buf, &entry)?;
             buf.push(b'\n');
         }
         let n = inverses.len() as u64;
-        if let Err(e) = self.journal.write_all(&buf).and_then(|_| self.journal.sync_data()) {
+        if let Err(e) = self
+            .journal
+            .write_all(&buf)
+            .and_then(|_| self.journal.sync_data())
+        {
             self.rollback(&inverses);
             return Err(e.into());
         }
@@ -223,6 +262,10 @@ impl Store {
 
     /// Write a fresh snapshot, keep the old one as a backup, and empty the
     /// journal.
+    ///
+    /// # Errors
+    ///
+    /// When the snapshot, its backup or the journal cannot be written.
     pub fn compact(&mut self) -> Result<(), StoreError> {
         self.tree.journal_seq = Some(self.seq);
         self.tree.saved_at = Some(now_ms());
@@ -251,15 +294,23 @@ impl Drop for Store {
 }
 
 fn lock(dir: &Path) -> Result<File, StoreError> {
-    let f = OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("lock"))?;
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("lock"))?;
     match f.try_lock() {
         Ok(()) => Ok(f),
-        Err(std::fs::TryLockError::WouldBlock) => Err(StoreError::Locked(dir.to_owned())),
-        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+        Err(fs::TryLockError::WouldBlock) => Err(StoreError::Locked(dir.to_owned())),
+        Err(fs::TryLockError::Error(e)) => Err(e.into()),
     }
 }
 
 /// Write via a temp file + fsync + rename, so readers see old or new, never half.
+///
+/// # Errors
+///
+/// When the temporary file cannot be written or renamed into place.
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     {
@@ -280,7 +331,11 @@ fn prune_backups(dir: &Path) -> std::io::Result<()> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("tree-")))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("tree-"))
+        })
         .collect();
     files.sort();
     while files.len() > KEEP_BACKUPS {
@@ -326,19 +381,37 @@ mod tests {
             let root = s.tree().root.id;
             let a = tab("a");
             let a_id = a.id;
-            s.apply(Op::Insert { parent: root, index: 0, node: Box::new(a) }).unwrap();
-            s.apply(Op::Insert { parent: root, index: 1, node: Box::new(tab("b")) }).unwrap();
+            s.apply(Op::Insert {
+                parent: root,
+                index: 0,
+                node: Box::new(a),
+            })
+            .unwrap();
+            s.apply(Op::Insert {
+                parent: root,
+                index: 1,
+                node: Box::new(tab("b")),
+            })
+            .unwrap();
             crash_copy(&live, &dir);
             (a_id, root)
         };
         // A half-written last line, as left by a crash mid-append.
-        let mut j = OpenOptions::new().append(true).open(dir.join("journal.jsonl")).unwrap();
-        j.write_all(b"{\"seq\":3,\"at\":1,\"op\":{\"op\":\"tra").unwrap();
+        let mut j = OpenOptions::new()
+            .append(true)
+            .open(dir.join("journal.jsonl"))
+            .unwrap();
+        j.write_all(b"{\"seq\":3,\"at\":1,\"op\":{\"op\":\"tra")
+            .unwrap();
         drop(j);
 
         let mut s = Store::open(&dir).unwrap();
         assert_eq!(s.tree().root.children.len(), 2);
-        assert!(s.warnings.iter().any(|w| w.contains("damaged")), "{:?}", s.warnings);
+        assert!(
+            s.warnings.iter().any(|w| w.contains("damaged")),
+            "{:?}",
+            s.warnings
+        );
         // New ops append cleanly after the cut.
         s.apply(Op::Trash { id: a_id, at: 1 }).unwrap();
         crash_copy(&dir, &dir.with_extension("again"));
@@ -369,8 +442,19 @@ mod tests {
         let mut s = Store::open(&dir).unwrap();
         let root = s.tree().root.id;
         let a = tab("a");
-        let bad = Op::Move { id: a.id, parent: root, index: 9 };
-        let r = s.apply_batch(vec![Op::Insert { parent: root, index: 0, node: Box::new(a) }, bad]);
+        let bad = Op::Move {
+            id: a.id,
+            parent: root,
+            index: 9,
+        };
+        let r = s.apply_batch(vec![
+            Op::Insert {
+                parent: root,
+                index: 0,
+                node: Box::new(a),
+            },
+            bad,
+        ]);
         assert!(r.is_err());
         assert!(s.tree().root.children.is_empty());
         assert_eq!(s.seq(), 0);

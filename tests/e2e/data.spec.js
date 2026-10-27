@@ -6,6 +6,19 @@ import { setup, launch, liveTree, shape, eventually, pageServer } from './helper
 const SHOTS = process.env.SHOTS;
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Click and wait for an event (download, file chooser); the canvas may
+// miss a click while it is still busy, so try a few times.
+async function clickFor(page, event, at) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const [ev] = await Promise.all([page.waitForEvent(event, { timeout: 5000 }), page.mouse.click(at.x, at.y)]);
+      return ev;
+    } catch (e) {
+      if (attempt >= 2) throw e;
+    }
+  }
+}
+
 async function openTree(ctx, env, srv) {
   await ctx.pages()[0].goto(`${srv.url}/p/one`);
   await eventually(() => expect(shape(liveTree(env.store), srv.url)).toBe('window\n  tab /p/one'));
@@ -26,7 +39,7 @@ test('data tab: export in each format, import a file as a group', async () => {
   if (SHOTS) await tree.screenshot({ path: `${SHOTS}/data1.png` });
   if (process.env.LOOK) return;
   // treetabs JSON (the default format).
-  const [dl] = await Promise.all([tree.waitForEvent('download'), tree.mouse.click(EXPORT.x, EXPORT.y)]);
+  const dl = await clickFor(tree, 'download', EXPORT);
   expect(dl.suggestedFilename()).toMatch(/^treetabs-\d{4}-\d\d-\d\d\.json$/);
   const json = JSON.parse(fs.readFileSync(await dl.path(), 'utf8'));
   expect(json.format).toBe('treetabs');
@@ -39,14 +52,14 @@ test('data tab: export in each format, import a file as a group', async () => {
   await pause(300);
   await tree.mouse.click(FORMAT.x, FORMAT.htmlY);
   await pause(300);
-  const [dl2] = await Promise.all([tree.waitForEvent('download'), tree.mouse.click(EXPORT.x, EXPORT.y)]);
+  const dl2 = await clickFor(tree, 'download', EXPORT);
   expect(dl2.suggestedFilename()).toMatch(/bookmarks\.html$/);
   expect(fs.readFileSync(await dl2.path(), 'utf8')).toContain(`<A HREF="${srv.url}/p/one">one</A>`);
   await pause(800);
   // Import the JSON back: added at the end as a group of saved tabs.
   const file = path.join(env.base, 'mine.json');
   fs.writeFileSync(file, JSON.stringify(json));
-  const [chooser] = await Promise.all([tree.waitForEvent('filechooser'), tree.mouse.click(IMPORT.x, IMPORT.y)]);
+  const chooser = await clickFor(tree, 'filechooser', IMPORT);
   await chooser.setFiles(file);
   await eventually(() => expect(shape(liveTree(env.store), srv.url)).toBe('window\n  tab /p/one\ngroup\n  saved_window\n    saved_tab /p/one'));
   expect(liveTree(env.store).root.children[1].custom_title).toBe('Imported from mine.json');

@@ -44,7 +44,10 @@ fn write_viewer(out: &Out, vid: u64, text: &str) {
             end -= 1;
         }
         let last = end == text.len();
-        write_out(out, &json!({"type": "viewer_msg", "vid": vid, "part": &text[start..end], "last": last}));
+        write_out(
+            out,
+            &json!({"type": "viewer_msg", "vid": vid, "part": &text[start..end], "last": last}),
+        );
         if last {
             break;
         }
@@ -97,7 +100,12 @@ fn viewer_envelope(v: &Value, dir: &Path, out: &Out, viewers: &Viewers) -> bool 
             let text = v.get("msg").and_then(Value::as_str).unwrap_or_default();
             match serde_json::from_str::<ClientMsg>(text) {
                 Ok(msg) => {
-                    let sender = viewers.lock().expect("viewers").get(&vid).cloned().flatten();
+                    let sender = viewers
+                        .lock()
+                        .expect("viewers")
+                        .get(&vid)
+                        .cloned()
+                        .flatten();
                     match sender {
                         Some(s) => {
                             if let Err(e) = s.send(&msg) {
@@ -130,30 +138,16 @@ fn main() {
     let dir = config::store_dir();
     let _ = std::fs::create_dir_all(&dir);
     init_log(&dir);
-    log::info!("host started, store {}, args {:?}", dir.display(), std::env::args().collect::<Vec<_>>());
+    log::info!(
+        "host started, store {}, args {:?}",
+        dir.display(),
+        std::env::args().collect::<Vec<_>>()
+    );
 
     let out: Out = Arc::new(Mutex::new(stdout()));
     let viewers: Viewers = Arc::default();
     let (tx, rx) = mpsc::channel::<Ev>();
-    let ext_tx = tx.clone();
-    thread::spawn(move || {
-        let mut input = stdin().lock();
-        loop {
-            match native::read(&mut input) {
-                Ok(Some(v)) => {
-                    if ext_tx.send(Ev::Ext(Some(v))).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    log::error!("reading from browser: {e}");
-                    break;
-                }
-            }
-        }
-        let _ = ext_tx.send(Ev::Ext(None));
-    });
+    spawn_browser_reader(tx.clone());
 
     let mut backoff = Duration::from_millis(200);
     loop {
@@ -174,56 +168,111 @@ fn main() {
         };
         backoff = Duration::from_millis(200);
         log::info!("connected (server in this process: {})", conn.is_server());
-
         let (sender, srx, server) = conn.split();
-
-        // Server -> browser.
-        let gone_tx = tx.clone();
-        let out2 = out.clone();
-        thread::spawn(move || {
-            for m in srx {
-                let v = match m {
-                    ServerMsg::Call { req, api, args } => json!({"type": "call", "req": req, "api": api, "args": args}),
-                    ServerMsg::Resync => json!({"type": "resync"}),
-                    ServerMsg::StoreMoved { dir } => {
-                        // The browser starts the host again, which reads the
-                        // new folder from its config.
-                        log::info!("store moved to {dir}: exiting so the browser restarts the host");
-                        std::process::exit(0);
-                    }
-                    _ => continue,
-                };
-                write_out(&out2, &v);
+        spawn_server_forwarder(srx, out.clone(), tx.clone());
+        match forward_browser(&rx, &sender, &dir, &out, &viewers) {
+            Session::Reconnect => {}
+            Session::BrowserClosed => {
+                // Stops an in-process server cleanly (snapshot written).
+                drop(server);
+                return;
             }
-            let _ = gone_tx.send(Ev::ServerGone);
-        });
+        }
+    }
+}
 
-        // Browser -> server.
+/// How a connection to the server ended.
+enum Session {
+    /// The server went away (or a write failed): connect again.
+    Reconnect,
+    /// The browser closed its side: the host stops.
+    BrowserClosed,
+}
+
+/// Messages from the browser (native messaging on stdin) into `tx`; `None`
+/// at the end.
+fn spawn_browser_reader(tx: mpsc::Sender<Ev>) {
+    thread::spawn(move || {
+        let mut input = stdin().lock();
         loop {
-            match rx.recv() {
-                Ok(Ev::Ext(Some(v))) => {
-                    if viewer_envelope(&v, &dir, &out, &viewers) {
-                        continue;
-                    }
-                    let Some(msg) = to_client_msg(v) else { continue };
-                    if let Err(e) = sender.send(&msg) {
-                        log::warn!("server write failed: {e}");
+            match native::read(&mut input) {
+                Ok(Some(v)) => {
+                    if tx.send(Ev::Ext(Some(v))).is_err() {
                         break;
                     }
                 }
-                Ok(Ev::Ext(None)) | Err(_) => {
-                    log::info!("browser closed the connection");
-                    for s in viewers.lock().expect("viewers").drain().filter_map(|(_, s)| s) {
-                        s.shutdown();
-                    }
-                    // Stops an in-process server cleanly (snapshot written).
-                    drop(server);
-                    return;
-                }
-                Ok(Ev::ServerGone) => {
-                    log::warn!("server went away, reconnecting");
+                Ok(None) => break,
+                Err(e) => {
+                    log::error!("reading from browser: {e}");
                     break;
                 }
+            }
+        }
+        let _ = tx.send(Ev::Ext(None));
+    });
+}
+
+/// Server calls to the browser, until the server goes away.
+fn spawn_server_forwarder(srx: mpsc::Receiver<ServerMsg>, out: Out, gone_tx: mpsc::Sender<Ev>) {
+    thread::spawn(move || {
+        for m in srx {
+            let v = match m {
+                ServerMsg::Call { req, api, args } => {
+                    json!({"type": "call", "req": req, "api": api, "args": args})
+                }
+                ServerMsg::Resync => json!({"type": "resync"}),
+                ServerMsg::StoreMoved { dir } => {
+                    // The browser starts the host again, which reads the
+                    // new folder from its config.
+                    log::info!("store moved to {dir}: exiting so the browser restarts the host");
+                    std::process::exit(0);
+                }
+                _ => continue,
+            };
+            write_out(&out, &v);
+        }
+        let _ = gone_tx.send(Ev::ServerGone);
+    });
+}
+
+/// Browser messages to the server (and to tree windows), until one side
+/// goes away.
+fn forward_browser(
+    rx: &mpsc::Receiver<Ev>,
+    sender: &Sender,
+    dir: &Path,
+    out: &Out,
+    viewers: &Viewers,
+) -> Session {
+    loop {
+        match rx.recv() {
+            Ok(Ev::Ext(Some(v))) => {
+                if viewer_envelope(&v, dir, out, viewers) {
+                    continue;
+                }
+                let Some(msg) = to_client_msg(v) else {
+                    continue;
+                };
+                if let Err(e) = sender.send(&msg) {
+                    log::warn!("server write failed: {e}");
+                    return Session::Reconnect;
+                }
+            }
+            Ok(Ev::Ext(None)) | Err(_) => {
+                log::info!("browser closed the connection");
+                for s in viewers
+                    .lock()
+                    .expect("viewers")
+                    .drain()
+                    .filter_map(|(_, s)| s)
+                {
+                    s.shutdown();
+                }
+                return Session::BrowserClosed;
+            }
+            Ok(Ev::ServerGone) => {
+                log::warn!("server went away, reconnecting");
+                return Session::Reconnect;
             }
         }
     }
@@ -233,13 +282,21 @@ fn to_client_msg(v: Value) -> Option<ClientMsg> {
     let t = v.get("type").and_then(Value::as_str)?;
     Some(match t {
         "snapshot" => ClientMsg::BrowserSnapshot {
-            windows: v.get("windows").and_then(Value::as_array).cloned().unwrap_or_default(),
+            windows: v
+                .get("windows")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
             browser: v.get("browser").and_then(Value::as_str).map(str::to_owned),
             label: v.get("label").and_then(Value::as_str).map(str::to_owned),
         },
         "event" => ClientMsg::BrowserEvent {
             name: v.get("name").and_then(Value::as_str)?.to_owned(),
-            args: v.get("args").and_then(Value::as_array).cloned().unwrap_or_default(),
+            args: v
+                .get("args")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
         },
         "result" => ClientMsg::CallResult {
             req: v.get("req").and_then(Value::as_u64)?,
@@ -247,7 +304,10 @@ fn to_client_msg(v: Value) -> Option<ClientMsg> {
             err: v.get("err").and_then(Value::as_str).map(str::to_owned),
         },
         "log" => {
-            log::info!("extension: {}", v.get("msg").and_then(Value::as_str).unwrap_or(""));
+            log::info!(
+                "extension: {}",
+                v.get("msg").and_then(Value::as_str).unwrap_or("")
+            );
             return None;
         }
         other => {
@@ -257,8 +317,11 @@ fn to_client_msg(v: Value) -> Option<ClientMsg> {
     })
 }
 
-fn init_log(dir: &std::path::Path) {
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("host.log"));
+fn init_log(dir: &Path) {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("host.log"));
     let mut b = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     if let Ok(f) = file {
         b.target(env_logger::Target::Pipe(Box::new(f)));

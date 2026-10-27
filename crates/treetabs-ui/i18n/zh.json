@@ -169,6 +169,7 @@
  "{n} browser(s) connected": "已连接 {n} 个浏览器",
  "{n} days": "{n} 天",
  "{n} match(es); double-click opens in the browser": "{n} 个结果；双击在浏览器中打开",
+ "{n} nodes selected": "已选择 {n} 个节点",
  "{title}: {n} nodes added at the end": "{title}：已在末尾添加 {n} 个节点",
  "{title}: {n} nodes added at the end ({warnings} warnings)": "{title}：已在末尾添加 {n} 个节点（{warnings} 个警告）"
 }

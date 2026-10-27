@@ -264,6 +264,27 @@ impl Node {
         }
     }
 
+    /// A copy of this node alone, without its children (cheap even for a
+    /// window with thousands of tabs below it).
+    #[must_use]
+    pub fn without_children(&self) -> Node {
+        Node {
+            id: self.id,
+            kind: self.kind.clone(),
+            title: self.title.clone(),
+            url: self.url.clone(),
+            favicon: self.favicon.clone(),
+            custom_title: self.custom_title.clone(),
+            custom_favicon: self.custom_favicon.clone(),
+            note: self.note.clone(),
+            collapsed: self.collapsed,
+            data: self.data.clone(),
+            marks: self.marks.clone(),
+            extra: self.extra.clone(),
+            children: Vec::new(),
+        }
+    }
+
     /// Number of nodes in this subtree, including self.
     pub fn count(&self) -> usize {
         1 + self.children.iter().map(Node::count).sum::<usize>()
@@ -444,6 +465,11 @@ impl Tree {
 
     /// Resolve a [`Position`] inside `parent` to a child index, as seen after
     /// `moving` (if any) has been taken out of the tree.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NotFound`] when `parent` (or a sibling named in `pos`) is
+    /// not in the tree.
     pub fn resolve(
         &self,
         parent: NodeId,
@@ -461,7 +487,10 @@ impl Tree {
             Position::FirstChild => 0,
             Position::LastChild => kids.len(),
             Position::Before(s) => kids.iter().position(|&c| c == s).unwrap_or(kids.len()),
-            Position::After(s) => kids.iter().position(|&c| c == s).map_or(kids.len(), |i| i + 1),
+            Position::After(s) => kids
+                .iter()
+                .position(|&c| c == s)
+                .map_or(kids.len(), |i| i + 1),
         })
     }
 
@@ -469,6 +498,11 @@ impl Tree {
     /// another moved node travel with it and are skipped. The ops must be
     /// applied in order; each one is computed against the tree as it will
     /// be after the previous ones.
+    ///
+    /// # Errors
+    ///
+    /// When a node is not in the tree, is the root, or would move into its
+    /// own subtree.
     pub fn plan_move(
         &self,
         ids: &[NodeId],
@@ -488,7 +522,8 @@ impl Tree {
             .iter()
             .copied()
             .filter(|&id| {
-                !ids.iter().any(|&o| o != id && self.root.find(o).is_some_and(|n| n.contains(id)))
+                !ids.iter()
+                    .any(|&o| o != id && self.root.find(o).is_some_and(|n| n.contains(id)))
             })
             .collect();
         // Simulate on a light copy of the target's child list.
@@ -497,7 +532,11 @@ impl Tree {
         let mut pos = pos;
         for id in top {
             let index = sim.resolve(target, pos, Some(id))?;
-            let op = crate::ops::Op::Move { id, parent: target, index };
+            let op = crate::ops::Op::Move {
+                id,
+                parent: target,
+                index,
+            };
             sim.apply_shallow_move(id, target, index);
             ops.push(op);
             pos = Position::After(id);
@@ -519,7 +558,10 @@ impl Tree {
                 n
             })
             .collect();
-        Ok(Tree { root, ..Default::default() })
+        Ok(Tree {
+            root,
+            ..Default::default()
+        })
     }
 
     fn apply_shallow_move(&mut self, id: NodeId, parent: NodeId, index: usize) {
@@ -568,7 +610,10 @@ mod tests {
         }
         assert_eq!(titles(t.root.find(w2id).unwrap()), ["a"]);
         // move c and a after b, in that order
-        for op in t.plan_move(&[cid, aid], w1id, Position::After(bid)).unwrap() {
+        for op in t
+            .plan_move(&[cid, aid], w1id, Position::After(bid))
+            .unwrap()
+        {
             t.apply(&op).unwrap();
         }
         assert_eq!(titles(t.root.find(w1id).unwrap()), ["b", "c", "a"]);
@@ -577,7 +622,10 @@ mod tests {
             t.apply(&op).unwrap();
         }
         assert_eq!(titles(t.root.find(w1id).unwrap()), ["b", "c", "a"]);
-        assert_eq!(t.plan_move(&[w1id], aid, Position::FirstChild).unwrap_err(), EditError::IntoSelf);
+        assert_eq!(
+            t.plan_move(&[w1id], aid, Position::FirstChild).unwrap_err(),
+            EditError::IntoSelf
+        );
     }
 
     #[test]
@@ -593,5 +641,25 @@ mod tests {
         assert_eq!(back.fix_ids(), 0);
         assert_eq!(back.root.children[1].id, t.root.children[1].id);
         assert!(NodeId::fresh().0 > t.root.children[1].id.0);
+    }
+}
+
+#[cfg(test)]
+mod without_children_tests {
+    use super::*;
+
+    #[test]
+    fn copies_the_node_but_not_its_subtree() {
+        let mut w = Node::new(NodeKind::SavedWindow);
+        w.custom_title = Some("Work".into());
+        w.children.push(Node::new(NodeKind::SavedTab));
+        let alone = w.without_children();
+        assert!(alone.children.is_empty());
+        let mut expected = w.clone();
+        expected.children.clear();
+        assert_eq!(
+            serde_json::to_value(&alone).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
     }
 }

@@ -101,7 +101,11 @@ impl Lang {
 
     /// Where missing texts come from before English.
     fn parent(self) -> Option<Lang> {
-        matches!(self, Lang::ArEg | Lang::ArLev | Lang::ArMag | Lang::ArGulf | Lang::ArIq).then_some(Lang::Ar)
+        matches!(
+            self,
+            Lang::ArEg | Lang::ArLev | Lang::ArMag | Lang::ArGulf | Lang::ArIq
+        )
+        .then_some(Lang::Ar)
     }
 
     /// Written right to left.
@@ -125,7 +129,10 @@ impl Lang {
                 _ => Lang::Ar,
             };
         }
-        Lang::ALL.into_iter().find(|l| l.code() == code).unwrap_or(Lang::En)
+        Lang::ALL
+            .into_iter()
+            .find(|l| l.code() == code)
+            .unwrap_or(Lang::En)
     }
 
     fn source(self) -> &'static str {
@@ -155,12 +162,15 @@ static CURRENT: AtomicU8 = AtomicU8::new(0);
 /// neither): a subset of Noto Sans CJK SC and Noto Sans Arabic, see
 /// `fonts/LICENSE-OFL.txt`. Arabic letters join (egui shapes text), but
 /// egui does not reorder mixed right-to-left text yet.
-pub fn install_fonts(ctx: &eframe::egui::Context) {
+pub fn install_fonts(ctx: &egui::Context) {
     use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
     use eframe::egui::{FontData, FontFamily};
     let data = FontData::from_static(include_bytes!("../fonts/NotoSansSC-subset.otf"));
     let families = [FontFamily::Proportional, FontFamily::Monospace]
-        .map(|family| InsertFontFamily { family, priority: FontPriority::Lowest })
+        .map(|family| InsertFontFamily {
+            family,
+            priority: FontPriority::Lowest,
+        })
         .to_vec();
     ctx.add_font(FontInsert::new("noto-sans-sc", data, families.clone()));
     let arabic = FontData::from_static(include_bytes!("../fonts/NotoSansArabic-Regular.ttf"));
@@ -173,12 +183,16 @@ pub fn system() -> Lang {
     #[cfg(target_arch = "wasm32")]
     {
         let nav = js_sys::Reflect::get(&js_sys::global(), &"navigator".into()).ok();
-        let lang = nav.and_then(|n| js_sys::Reflect::get(&n, &"language".into()).ok()).and_then(|l| l.as_string());
+        let lang = nav
+            .and_then(|n| js_sys::Reflect::get(&n, &"language".into()).ok())
+            .and_then(|l| l.as_string());
         Lang::from_locale(&lang.unwrap_or_default())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let var = ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()));
+        let var = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .into_iter()
+            .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()));
         Lang::from_locale(&var.unwrap_or_default())
     }
 }
@@ -198,11 +212,14 @@ fn tables() -> &'static [Table; COUNT] {
     T.get_or_init(|| {
         Lang::ALL.map(|l| {
             // A broken file means English for that language, not an error.
-            let map: HashMap<String, String> = serde_json::from_str(l.source()).unwrap_or_else(|e| {
-                log::warn!("bad translation file {}: {e}", l.code());
-                HashMap::new()
-            });
-            map.into_iter().map(|(k, v)| (&*k.leak(), &*v.leak())).collect()
+            let map: HashMap<String, String> =
+                serde_json::from_str(l.source()).unwrap_or_else(|e| {
+                    log::warn!("bad translation file {}: {e}", l.code());
+                    HashMap::new()
+                });
+            map.into_iter()
+                .map(|(k, v)| (&*k.leak(), &*v.leak()))
+                .collect()
         })
     })
 }
@@ -228,7 +245,7 @@ pub fn is_rtl() -> bool {
 
 /// Text ready for drawing: in a right-to-left interface, or when it has
 /// right-to-left letters, put in the order egui shows correctly (see
-/// [`crate::bidi`]). Only for display: copy and edit the original text.
+/// `bidi`). Only for display: copy and edit the original text.
 pub fn shown(text: &str) -> String {
     crate::bidi::visual(text, is_rtl())
 }
@@ -242,10 +259,13 @@ pub fn tr(text: &'static str) -> &'static str {
         return s;
     }
     // Reordered once per text, then kept.
-    static SHOWN: OnceLock<std::sync::Mutex<HashMap<(u8, &'static str), &'static str>>> = OnceLock::new();
+    static SHOWN: OnceLock<std::sync::Mutex<HashMap<(u8, &'static str), &'static str>>> =
+        OnceLock::new();
     let cache = SHOWN.get_or_init(Default::default);
     let mut cache = cache.lock().expect("no panics while held");
-    cache.entry((lang as u8, text)).or_insert_with(|| crate::bidi::visual(s, true).leak())
+    cache
+        .entry((lang as u8, text))
+        .or_insert_with(|| crate::bidi::visual(s, true).leak())
 }
 
 /// `text` in the current language in reading order, for widgets that
@@ -307,19 +327,42 @@ mod tests {
     /// Every literal passed to `tr(`/`trf(` in the UI sources.
     fn keys() -> BTreeSet<String> {
         let sources = [
-            include_str!("app.rs"),
+            include_str!("app/mod.rs"),
+            include_str!("app/commands.rs"),
+            include_str!("app/data.rs"),
+            include_str!("app/frame.rs"),
+            include_str!("app/layout.rs"),
+            include_str!("app/panels.rs"),
+            include_str!("app/rows.rs"),
+            include_str!("app/toolbar.rs"),
+            include_str!("app/tree.rs"),
+            include_str!("app/windows.rs"),
             include_str!("settings.rs"),
             include_str!("search.rs"),
-            include_str!("i18n.rs"),
+            // Not this test's own code.
+            include_str!("i18n.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(""),
             include_str!("../../treetabs-gui/src/main.rs"),
             include_str!("../../../extension/ui/src/lib.rs"),
         ];
         let mut out = BTreeSet::new();
         for src in sources {
-            for call in ["tr(\"", "trf(\"", "trl(\""] {
+            // Calls may be split over lines by rustfmt: `trf(\n    "text"`.
+            for call in ["tr(", "trf(", "trl("] {
                 let mut rest = src;
                 while let Some(i) = rest.find(call) {
+                    // Only whole names (not `ctr(`, `attr(` …).
+                    let whole = i == 0
+                        || !rest.as_bytes()[i - 1].is_ascii_alphanumeric()
+                            && rest.as_bytes()[i - 1] != b'_';
                     rest = &rest[i + call.len()..];
+                    let after = rest.trim_start();
+                    if !whole || !after.starts_with('"') {
+                        continue;
+                    }
+                    rest = &after[1..];
                     // Up to the closing quote, honouring \" escapes.
                     let mut key = String::new();
                     let mut chars = rest.chars();
@@ -363,14 +406,19 @@ mod tests {
         assert!(keys.len() > 80, "found only {} keys", keys.len());
         let mut problems = Vec::new();
         for lang in Lang::ALL.into_iter().skip(1) {
-            let map: HashMap<String, String> = serde_json::from_str(lang.source()).expect("valid json");
+            let map: HashMap<String, String> =
+                serde_json::from_str(lang.source()).expect("valid json");
             for k in &keys {
                 match map.get(k) {
                     // Dialects only hold what differs from their parent.
                     None if lang.parent().is_some() => {}
                     None => problems.push(format!("{}: missing {k:?}", lang.code())),
-                    Some(v) if placeholders(v) != placeholders(k) => problems.push(format!("{}: placeholders differ in {k:?}", lang.code())),
-                    Some(v) if v.trim().is_empty() => problems.push(format!("{}: empty {k:?}", lang.code())),
+                    Some(v) if placeholders(v) != placeholders(k) => {
+                        problems.push(format!("{}: placeholders differ in {k:?}", lang.code()))
+                    }
+                    Some(v) if v.trim().is_empty() => {
+                        problems.push(format!("{}: empty {k:?}", lang.code()))
+                    }
                     _ => {}
                 }
             }
@@ -380,7 +428,12 @@ mod tests {
                 }
             }
         }
-        assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
+        assert!(
+            problems.is_empty(),
+            "{} problems:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
     }
 
     #[test]

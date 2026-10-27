@@ -13,7 +13,7 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 #[oxichrome::extension(
     name = "treetabs",
-    version = "0.2.0",
+    version = "0.3.0",
     description = "Tree of windows and tabs, kept in sync with bookmarks",
     permissions = ["tabs", "bookmarks", "nativeMessaging", "storage", "favicon"]
 )]
@@ -115,7 +115,9 @@ async fn start() {
     for name in EVENTS {
         add_listener(name);
     }
-    listen("action.onClicked", |_tab| spawn_local(async { open_tree_window().await }));
+    listen("action.onClicked", |_tab| {
+        spawn_local(async { open_tree_window().await })
+    });
     // Same action for keyboard shortcuts and tests: `treetabsOpenTree()`.
     let open = Closure::<dyn FnMut()>::new(|| spawn_local(async { open_tree_window().await }));
     let _ = Reflect::set(&js_sys::global(), &"treetabsOpenTree".into(), open.as_ref());
@@ -143,7 +145,10 @@ fn post_to(port: &JsValue, msg: &JsValue) {
 /// Focus the tree window if it is open, otherwise open it.
 async fn open_tree_window() {
     let url = path("runtime.getURL")
-        .and_then(|f| f.unchecked_into::<Function>().call1(&path("runtime").unwrap(), &TREE_PAGE.into()))
+        .and_then(|f| {
+            f.unchecked_into::<Function>()
+                .call1(&path("runtime").unwrap(), &TREE_PAGE.into())
+        })
         .ok()
         .and_then(|u| u.as_string())
         .unwrap_or_default();
@@ -153,7 +158,11 @@ async fn open_tree_window() {
         let tabs: Array = tabs.unchecked_into();
         if let Some(tab) = tabs.iter().next() {
             let win = Reflect::get(&tab, &"windowId".into()).unwrap_or(JsValue::NULL);
-            let _ = call("windows.update", &Array::of2(&win, &obj(&[("focused", true.into())]))).await;
+            let _ = call(
+                "windows.update",
+                &Array::of2(&win, &obj(&[("focused", true.into())])),
+            )
+            .await;
             return;
         }
     }
@@ -167,7 +176,10 @@ async fn open_tree_window() {
         .filter(|b| b.is_object());
     let num = |o: &JsValue, k: &str| Reflect::get(o, &k.into()).ok().and_then(|v| v.as_f64());
     let bounds = match saved {
-        Some(b) if num(&b, "width").unwrap_or(0.0) >= 200.0 && num(&b, "height").unwrap_or(0.0) >= 200.0 => {
+        Some(b)
+            if num(&b, "width").unwrap_or(0.0) >= 200.0
+                && num(&b, "height").unwrap_or(0.0) >= 200.0 =>
+        {
             ["left", "top", "width", "height"].map(|k| (k, num(&b, k).unwrap_or(0.0)))
         }
         _ => {
@@ -176,7 +188,12 @@ async fn open_tree_window() {
                 .ok()
                 .and_then(|w| num(&w, "height"))
                 .unwrap_or(900.0);
-            [("left", 0.0), ("top", 0.0), ("width", f64::from(TREE_WIDTH)), ("height", height)]
+            [
+                ("left", 0.0),
+                ("top", 0.0),
+                ("width", f64::from(TREE_WIDTH)),
+                ("height", height),
+            ]
         }
     };
     for (k, v) in bounds {
@@ -189,7 +206,12 @@ async fn open_tree_window() {
 
 /// A tree-window page connected: relay its messages to the host.
 fn viewer_connected(port: JsValue) {
-    if Reflect::get(&port, &"name".into()).ok().and_then(|n| n.as_string()).as_deref() != Some("viewer") {
+    if Reflect::get(&port, &"name".into())
+        .ok()
+        .and_then(|n| n.as_string())
+        .as_deref()
+        != Some("viewer")
+    {
         return;
     }
     let vid = NEXT_VIEWER.with(|n| {
@@ -198,14 +220,24 @@ fn viewer_connected(port: JsValue) {
         v
     });
     let on_msg = Closure::<dyn FnMut(JsValue)>::new(move |m: JsValue| {
-        post(&obj(&[("type", "viewer_msg".into()), ("vid", vid.into()), ("msg", m)]));
+        post(&obj(&[
+            ("type", "viewer_msg".into()),
+            ("vid", vid.into()),
+            ("msg", m),
+        ]));
     });
     let on_disconnect = Closure::<dyn FnMut(JsValue)>::new(move |_p: JsValue| {
         VIEWERS.with(|v| v.borrow_mut().remove(&vid));
         PARTS.with(|p| p.borrow_mut().remove(&vid));
-        post(&obj(&[("type", "viewer_close".into()), ("vid", vid.into())]));
+        post(&obj(&[
+            ("type", "viewer_close".into()),
+            ("vid", vid.into()),
+        ]));
     });
-    for (ev, cb) in [("onMessage", on_msg.as_ref()), ("onDisconnect", on_disconnect.as_ref())] {
+    for (ev, cb) in [
+        ("onMessage", on_msg.as_ref()),
+        ("onDisconnect", on_disconnect.as_ref()),
+    ] {
         if let Ok(e) = Reflect::get(&port, &ev.into())
             && let Ok(add) = Reflect::get(&e, &"addListener".into())
         {
@@ -228,9 +260,18 @@ fn host_down_status() -> JsValue {
 
 /// Message for a viewer from the host; large ones arrive in parts.
 fn viewer_message(msg: &JsValue) {
-    let vid = Reflect::get(msg, &"vid".into()).ok().and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
-    let part = Reflect::get(msg, &"part".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
-    let last = Reflect::get(msg, &"last".into()).ok().and_then(|v| v.as_bool()).unwrap_or(true);
+    let vid = Reflect::get(msg, &"vid".into())
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as u32;
+    let part = Reflect::get(msg, &"part".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_default();
+    let last = Reflect::get(msg, &"last".into())
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let full = PARTS.with(|p| {
         let mut p = p.borrow_mut();
         let buf = p.entry(vid).or_default();
@@ -251,26 +292,32 @@ fn add_listener(name: &'static str) {
         web_sys::console::warn_1(&format!("[treetabs] no event {name}").into());
         return;
     };
-    let cb = Closure::<dyn FnMut(JsValue, JsValue, JsValue)>::new(move |a: JsValue, b: JsValue, c: JsValue| {
-        let args = Array::new();
-        for v in [a, b, c] {
-            if v.is_undefined() {
-                break;
+    let cb = Closure::<dyn FnMut(JsValue, JsValue, JsValue)>::new(
+        move |a: JsValue, b: JsValue, c: JsValue| {
+            let args = Array::new();
+            for v in [a, b, c] {
+                if v.is_undefined() {
+                    break;
+                }
+                args.push(&v);
             }
-            args.push(&v);
-        }
-        let msg = obj(&[("type", "event".into()), ("name", name.into()), ("args", args.into())]);
-        let held = HELD.with(|h| match h.borrow_mut().as_mut() {
-            Some(q) => {
-                q.push(msg.clone());
-                true
+            let msg = obj(&[
+                ("type", "event".into()),
+                ("name", name.into()),
+                ("args", args.into()),
+            ]);
+            let held = HELD.with(|h| match h.borrow_mut().as_mut() {
+                Some(q) => {
+                    q.push(msg.clone());
+                    true
+                }
+                None => false,
+            });
+            if !held {
+                post(&msg);
             }
-            None => false,
-        });
-        if !held {
-            post(&msg);
-        }
-    });
+        },
+    );
     if let Ok(add) = Reflect::get(&event, &"addListener".into()) {
         let add: Function = add.unchecked_into();
         let _ = add.call1(&event, cb.as_ref());
@@ -279,9 +326,10 @@ fn add_listener(name: &'static str) {
 }
 
 fn connect() {
-    let port = match path("runtime.connectNative")
-        .and_then(|f| f.unchecked_into::<Function>().call1(&path("runtime").unwrap(), &HOST.into()))
-    {
+    let port = match path("runtime.connectNative").and_then(|f| {
+        f.unchecked_into::<Function>()
+            .call1(&path("runtime").unwrap(), &HOST.into())
+    }) {
         Ok(p) => p,
         Err(e) => {
             web_sys::console::error_2(&"[treetabs] connectNative failed".into(), &e);
@@ -307,7 +355,10 @@ fn connect() {
         });
         schedule_reconnect();
     });
-    for (ev, cb) in [("onMessage", on_message.as_ref()), ("onDisconnect", on_disconnect.as_ref())] {
+    for (ev, cb) in [
+        ("onMessage", on_message.as_ref()),
+        ("onDisconnect", on_disconnect.as_ref()),
+    ] {
         if let Ok(e) = Reflect::get(&port, &ev.into())
             && let Ok(add) = Reflect::get(&e, &"addListener".into())
         {
@@ -337,7 +388,10 @@ fn schedule_reconnect() {
 }
 
 async fn handle(msg: JsValue) {
-    let kind = Reflect::get(&msg, &"type".into()).ok().and_then(|t| t.as_string()).unwrap_or_default();
+    let kind = Reflect::get(&msg, &"type".into())
+        .ok()
+        .and_then(|t| t.as_string())
+        .unwrap_or_default();
     match kind.as_str() {
         "resync" => {
             let id = browser_id().await;
@@ -359,8 +413,13 @@ async fn handle(msg: JsValue) {
         }
         "call" => {
             let req = Reflect::get(&msg, &"req".into()).unwrap_or(JsValue::NULL);
-            let api = Reflect::get(&msg, &"api".into()).ok().and_then(|a| a.as_string()).unwrap_or_default();
-            let args: Array = Reflect::get(&msg, &"args".into()).map(|a| a.unchecked_into()).unwrap_or_default();
+            let api = Reflect::get(&msg, &"api".into())
+                .ok()
+                .and_then(|a| a.as_string())
+                .unwrap_or_default();
+            let args: Array = Reflect::get(&msg, &"args".into())
+                .map(|a| a.unchecked_into())
+                .unwrap_or_default();
             let reply = match call(&api, &args).await {
                 Ok(v) => obj(&[("type", "result".into()), ("req", req), ("ok", v)]),
                 Err(e) => {
@@ -369,7 +428,11 @@ async fn handle(msg: JsValue) {
                         .and_then(|m| m.as_string())
                         .or_else(|| e.as_string())
                         .unwrap_or_else(|| format!("{e:?}"));
-                    obj(&[("type", "result".into()), ("req", req), ("err", text.into())])
+                    obj(&[
+                        ("type", "result".into()),
+                        ("req", req),
+                        ("err", text.into()),
+                    ])
                 }
             };
             post(&reply);
@@ -384,12 +447,20 @@ async fn handle(msg: JsValue) {
 fn browser_label() -> String {
     let g = js_sys::global();
     let nav = Reflect::get(&g, &"navigator".into()).unwrap_or(JsValue::NULL);
-    let ua = Reflect::get(&nav, &"userAgent".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+    let ua = Reflect::get(&nav, &"userAgent".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_default();
     let has = |k: &str| Reflect::get(&nav, &k.into()).is_ok_and(|v| !v.is_undefined());
     // Chrome tells its brand only here.
     let brands = Reflect::get(&nav, &"userAgentData".into())
         .and_then(|d| Reflect::get(&d, &"brands".into()))
-        .map(|b| Array::from(&b).iter().filter_map(|x| Reflect::get(&x, &"brand".into()).ok()?.as_string()).collect::<Vec<_>>())
+        .map(|b| {
+            Array::from(&b)
+                .iter()
+                .filter_map(|x| Reflect::get(&x, &"brand".into()).ok()?.as_string())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     if ua.contains("Firefox/") {
         "Firefox".into()
@@ -441,7 +512,9 @@ async fn load_browser_id() -> JsValue {
 
 /// Call `chrome.<api>(...args)`; MV3 APIs return promises.
 async fn call(api: &str, args: &Array) -> Result<JsValue, JsValue> {
-    let (ns, name) = api.rsplit_once('.').ok_or_else(|| JsValue::from_str("bad api name"))?;
+    let (ns, name) = api
+        .rsplit_once('.')
+        .ok_or_else(|| JsValue::from_str("bad api name"))?;
     let target = path(ns)?;
     let f: Function = Reflect::get(&target, &name.into())?
         .dyn_into()

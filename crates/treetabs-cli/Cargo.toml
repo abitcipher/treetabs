@@ -2,6 +2,7 @@
 name = "treetabs-cli"
 description = "Convert Tabs Outliner data into portable treetabs JSON"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 
@@ -15,3 +16,6 @@ treetabs-sync.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+
+[lints]
+workspace = true

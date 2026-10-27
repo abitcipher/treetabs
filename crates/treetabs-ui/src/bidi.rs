@@ -33,7 +33,10 @@ pub fn visual(text: &str, rtl: bool) -> String {
     if !rtl && !has_rtl(text) {
         return text.to_owned();
     }
-    text.split('\n').map(|line| visual_line(line, rtl)).collect::<Vec<_>>().join("\n")
+    text.split('\n')
+        .map(|line| visual_line(line, rtl))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn visual_line(line: &str, rtl: bool) -> String {
@@ -42,7 +45,9 @@ fn visual_line(line: &str, rtl: bool) -> String {
     }
     let level = rtl.then(Level::rtl);
     let info = BidiInfo::new(line, level);
-    let Some(para) = info.paragraphs.first() else { return line.to_owned() };
+    let Some(para) = info.paragraphs.first() else {
+        return line.to_owned();
+    };
     // Runs in on-screen order; right-to-left runs reversed, with their
     // brackets mirrored (egui draws "(" as "(" whatever the direction).
     let (levels, runs) = info.visual_runs(para, para.range.clone());
@@ -99,37 +104,84 @@ fn is_mark(c: char) -> bool {
     matches!(c as u32, 0x0300..=0x036F | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06ED | 0x200C | 0x200D)
 }
 
+/// Base direction of a paragraph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    LeftToRight,
+    RightToLeft,
+}
+
+impl Direction {
+    /// The interface's direction.
+    pub fn of_interface() -> Self {
+        if crate::i18n::is_rtl() {
+            Direction::RightToLeft
+        } else {
+            Direction::LeftToRight
+        }
+    }
+}
+
+/// Text color of a paragraph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    /// Dimmed, for explanations.
+    Weak,
+}
+
 /// A wrapped paragraph that may be right to left: wrapped at `width` in
 /// reading order first (so lines keep their order), then each line
-/// reordered. Right-aligned when `rtl`.
-pub fn paragraph(ui: &mut egui::Ui, text: &str, rtl: bool, weak: bool) {
+/// reordered. Right-aligned when right to left.
+pub fn paragraph(ui: &mut egui::Ui, text: &str, dir: Direction, tone: Tone) {
+    let rtl = dir == Direction::RightToLeft;
+    let weak = tone == Tone::Weak;
     if !rtl && !has_rtl(text) {
         let t = egui::RichText::new(text);
         ui.add(egui::Label::new(if weak { t.weak() } else { t }).wrap());
         return;
     }
     let width = ui.available_width().max(40.0);
-    let color = if weak { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
+    let color = if weak {
+        ui.visuals().weak_text_color()
+    } else {
+        ui.visuals().text_color()
+    };
     let font = egui::TextStyle::Body.resolve(ui.style());
     let lines = wrap_lines(ui, text, &font, width);
     let shown: Vec<String> = lines.iter().map(|l| visual_line(l, rtl)).collect();
-    let layout = if rtl { egui::Layout::top_down(egui::Align::Max) } else { egui::Layout::top_down(egui::Align::Min) };
+    let layout = if rtl {
+        egui::Layout::top_down(egui::Align::Max)
+    } else {
+        egui::Layout::top_down(egui::Align::Min)
+    };
     ui.with_layout(layout, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for l in shown {
-            ui.add(egui::Label::new(egui::RichText::new(l).font(font.clone()).color(color)).extend());
+            ui.add(
+                egui::Label::new(egui::RichText::new(l).font(font.clone()).color(color)).extend(),
+            );
         }
     });
 }
 
 /// Break `text` into lines no wider than `width`, at spaces where possible.
 fn wrap_lines(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32) -> Vec<String> {
-    let measure = |s: &str| ui.painter().layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::WHITE).size().x;
+    let measure = |s: &str| {
+        ui.painter()
+            .layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+    };
     let mut lines = Vec::new();
     for para in text.split('\n') {
         let mut line = String::new();
         for word in para.split(' ') {
-            let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
+            let candidate = if line.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{line} {word}")
+            };
             if !line.is_empty() && measure(&candidate) > width {
                 lines.push(std::mem::take(&mut line));
                 line = word.to_owned();
@@ -145,7 +197,11 @@ fn wrap_lines(ui: &egui::Ui, text: &str, font: &egui::FontId, width: f32) -> Vec
 /// Direction of the paragraph: right to left in a right-to-left interface,
 /// otherwise from the first strong letter.
 fn base_rtl(text: &str, ui_rtl: bool) -> bool {
-    ui_rtl || matches!(unicode_bidi::get_base_direction(text), unicode_bidi::Direction::Rtl)
+    ui_rtl
+        || matches!(
+            unicode_bidi::get_base_direction(text),
+            unicode_bidi::Direction::Rtl
+        )
 }
 
 /// Where the text cursor goes on screen, for each logical position
@@ -164,7 +220,12 @@ fn caret_xs(galley: &egui::Galley, origin: egui::Pos2, text: &str, ui_rtl: bool)
     let mut glyphs: Vec<(f32, f32, char)> = galley
         .rows
         .iter()
-        .flat_map(|r| r.glyphs.iter().filter(|g| g.advance_width > 0.0).map(|g| (g.pos.x, g.advance_width, g.chr)))
+        .flat_map(|r| {
+            r.glyphs
+                .iter()
+                .filter(|g| g.advance_width > 0.0)
+                .map(|g| (g.pos.x, g.advance_width, g.chr))
+        })
         .collect();
     glyphs.sort_by(|a, b| a.0.total_cmp(&b.0));
     // A box for each logical character. Marks and ligature parts (lam-alef)
@@ -173,7 +234,11 @@ fn caret_xs(galley: &egui::Galley, origin: egui::Pos2, text: &str, ui_rtl: bool)
     let mut g = 0;
     let mut last = (0.0, 0.0);
     for &i in &order {
-        let want = if levels[i].is_rtl() { mirror(chars[i]) } else { chars[i] };
+        let want = if levels[i].is_rtl() {
+            mirror(chars[i])
+        } else {
+            chars[i]
+        };
         if g < glyphs.len() && glyphs[g].2 == want {
             last = (glyphs[g].0, glyphs[g].0 + glyphs[g].1);
             g += 1;
@@ -196,6 +261,71 @@ fn caret_xs(galley: &egui::Galley, origin: egui::Pos2, text: &str, ui_rtl: bool)
         .collect()
 }
 
+/// Logical order runs right to left: ← moves forward in the text.
+fn swap_arrow_keys(ui: &egui::Ui) {
+    ui.ctx().input_mut(|i| {
+        for e in &mut i.events {
+            if let egui::Event::Key { key, .. } = e {
+                *key = match *key {
+                    egui::Key::ArrowLeft => egui::Key::ArrowRight,
+                    egui::Key::ArrowRight => egui::Key::ArrowLeft,
+                    k => k,
+                };
+            }
+        }
+    });
+}
+
+/// A press puts the cursor at the position nearest the pointer (`xs`: the
+/// screen x of each cursor position).
+fn cursor_to_pointer(
+    ui: &egui::Ui,
+    id: egui::Id,
+    state: &egui::text_edit::TextEditState,
+    xs: &[f32],
+) {
+    let Some(p) = ui.input(|i| i.pointer.interact_pos()) else {
+        return;
+    };
+    let nearest = (0..xs.len())
+        .min_by(|&a, &b| (xs[a] - p.x).abs().total_cmp(&(xs[b] - p.x).abs()))
+        .unwrap_or(0);
+    let mut state = state.clone();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(nearest),
+        )));
+    state.store(ui.ctx(), id);
+    ui.ctx().request_repaint();
+}
+
+/// Our own blinking cursor at `x` (egui's is hidden: it would sit by the
+/// reordered text).
+fn draw_cursor(
+    ui: &egui::Ui,
+    style: &egui::style::TextCursorStyle,
+    clip: egui::Rect,
+    x: f32,
+    top: f32,
+    row_h: f32,
+) {
+    let time = ui.input(|i| i.time);
+    let period = f64::from(style.on_duration + style.off_duration);
+    let on = !style.blink || (time % period) < f64::from(style.on_duration);
+    if on {
+        let stroke = egui::Stroke::new(style.stroke.width.max(1.5), ui.visuals().text_color());
+        ui.painter()
+            .with_clip_rect(clip.expand(2.0))
+            .line_segment([egui::pos2(x, top), egui::pos2(x, top + row_h)], stroke);
+    }
+    if style.blink {
+        let next = style.on_duration.min(style.off_duration).max(0.1);
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f32(next));
+    }
+}
+
 /// A one-line text field that also shows right-to-left text correctly:
 /// the text is drawn in bidi order, the cursor is drawn where it belongs,
 /// clicks put it under the pointer, and the arrow keys move it visually
@@ -208,27 +338,23 @@ pub fn line_edit(
 ) -> egui::Response {
     let ui_rtl = crate::i18n::is_rtl();
     if !ui_rtl && !has_rtl(text) {
-        return configure(egui::TextEdit::singleline(text).id(id)).show(ui).response.response;
+        return configure(egui::TextEdit::singleline(text).id(id))
+            .show(ui)
+            .response
+            .response;
     }
     let focused = ui.memory(|m| m.has_focus(id));
     if focused && base_rtl(text, ui_rtl) {
-        // Logical order runs right to left here: swap the arrows.
-        ui.ctx().input_mut(|i| {
-            for e in &mut i.events {
-                if let egui::Event::Key { key, .. } = e {
-                    *key = match *key {
-                        egui::Key::ArrowLeft => egui::Key::ArrowRight,
-                        egui::Key::ArrowRight => egui::Key::ArrowLeft,
-                        k => k,
-                    };
-                }
-            }
-        });
+        swap_arrow_keys(ui);
     }
     let font = egui::TextStyle::Body.resolve(ui.style());
     let color = ui.visuals().widgets.inactive.text_color();
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-        let job = egui::text::LayoutJob::simple_singleline(visual(buf.as_str(), ui_rtl), font.clone(), color);
+        let job = egui::text::LayoutJob::simple_singleline(
+            visual(buf.as_str(), ui_rtl),
+            font.clone(),
+            color,
+        );
         ui.painter().layout_job(job)
     };
     let cursor_style = ui.visuals().text_cursor.clone();
@@ -237,8 +363,18 @@ pub fn line_edit(
             // egui would put its cursor by the reordered text: ours instead.
             ui.visuals_mut().text_cursor.stroke.color = egui::Color32::TRANSPARENT;
             // Right-to-left text starts at the right edge, as in browsers.
-            let align = if base_rtl(text, ui_rtl) { egui::Align::Max } else { egui::Align::Min };
-            configure(egui::TextEdit::singleline(text).id(id).layouter(&mut layouter).horizontal_align(align)).show(ui)
+            let align = if base_rtl(text, ui_rtl) {
+                egui::Align::Max
+            } else {
+                egui::Align::Min
+            };
+            configure(
+                egui::TextEdit::singleline(text)
+                    .id(id)
+                    .layouter(&mut layouter)
+                    .horizontal_align(align),
+            )
+            .show(ui)
         })
         .inner;
     let response = out.response.response.clone();
@@ -246,33 +382,22 @@ pub fn line_edit(
         return response;
     }
     let xs = caret_xs(&out.galley, out.galley_pos, text, ui_rtl);
-    // A press puts the cursor at the nearest position under the pointer.
-    let pressed = ui.input(|i| i.pointer.primary_pressed());
-    if pressed
-        && response.contains_pointer()
-        && let Some(p) = ui.input(|i| i.pointer.interact_pos())
-    {
-        let nearest = (0..xs.len()).min_by(|&a, &b| (xs[a] - p.x).abs().total_cmp(&(xs[b] - p.x).abs())).unwrap_or(0);
-        let mut state = out.state.clone();
-        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(nearest))));
-        state.store(ui.ctx(), id);
-        ui.ctx().request_repaint();
+    if ui.input(|i| i.pointer.primary_pressed()) && response.contains_pointer() {
+        cursor_to_pointer(ui, id, &out.state, &xs);
     }
-    if let Some(range) = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range()) {
-        let p = range.primary.index.0.min(xs.len() - 1);
-        let x = xs[p];
+    if let Some(range) =
+        egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range())
+    {
+        let x = xs[range.primary.index.0.min(xs.len() - 1)];
         let row_h = out.galley.rows.first().map_or(font.size, |r| r.height());
-        let top = out.galley_pos.y;
-        let time = ui.input(|i| i.time);
-        let period = f64::from(cursor_style.on_duration + cursor_style.off_duration);
-        let on = !cursor_style.blink || (time % period) < f64::from(cursor_style.on_duration);
-        if on {
-            let stroke = egui::Stroke::new(cursor_style.stroke.width.max(1.5), ui.visuals().text_color());
-            ui.painter().with_clip_rect(out.text_clip_rect.expand(2.0)).line_segment([egui::pos2(x, top), egui::pos2(x, top + row_h)], stroke);
-        }
-        if cursor_style.blink {
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(cursor_style.on_duration.min(cursor_style.off_duration).max(0.1)));
-        }
+        draw_cursor(
+            ui,
+            &cursor_style,
+            out.text_clip_rect,
+            x,
+            out.galley_pos.y,
+            row_h,
+        );
     }
     response
 }
@@ -287,10 +412,22 @@ mod tests {
         crate::i18n::install_fonts(&ctx);
         let mut out = String::new();
         let mut full = ctx.run_ui(Default::default(), |ui| {
-            let galley = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(14.0), egui::Color32::BLACK);
+            let galley = ui.painter().layout_no_wrap(
+                text.to_owned(),
+                egui::FontId::proportional(14.0),
+                egui::Color32::BLACK,
+            );
             // Zero-width glyphs are cursor placeholders, not drawn.
-            let mut glyphs: Vec<(f32, char)> =
-                galley.rows.iter().flat_map(|r| r.glyphs.iter().filter(|g| g.advance_width > 0.0).map(|g| (g.pos.x, g.chr))).collect();
+            let mut glyphs: Vec<(f32, char)> = galley
+                .rows
+                .iter()
+                .flat_map(|r| {
+                    r.glyphs
+                        .iter()
+                        .filter(|g| g.advance_width > 0.0)
+                        .map(|g| (g.pos.x, g.chr))
+                })
+                .collect();
             glyphs.sort_by(|a, b| a.0.total_cmp(&b.0));
             out = glyphs.into_iter().map(|g| g.1).collect();
         });
@@ -303,7 +440,16 @@ mod tests {
     /// renderer should.
     fn bidi_visual(text: &str, rtl: bool) -> String {
         let info = BidiInfo::new(text, rtl.then(Level::rtl));
-        let mirrored: String = text.char_indices().map(|(i, c)| if info.levels[i].is_rtl() { mirror(c) } else { c }).collect();
+        let mirrored: String = text
+            .char_indices()
+            .map(|(i, c)| {
+                if info.levels[i].is_rtl() {
+                    mirror(c)
+                } else {
+                    c
+                }
+            })
+            .collect();
         let info = BidiInfo::new(&mirrored, rtl.then(Level::rtl));
         let para = &info.paragraphs[0];
         info.reorder_line(para, para.range.clone()).into_owned()
@@ -344,7 +490,11 @@ mod tests {
         crate::i18n::install_fonts(&ctx);
         let mut xs = Vec::new();
         let mut full = ctx.run_ui(Default::default(), |ui| {
-            let galley = ui.painter().layout_no_wrap(visual(text, ui_rtl), egui::FontId::proportional(14.0), egui::Color32::BLACK);
+            let galley = ui.painter().layout_no_wrap(
+                visual(text, ui_rtl),
+                egui::FontId::proportional(14.0),
+                egui::Color32::BLACK,
+            );
             xs = caret_xs(&galley, egui::Pos2::ZERO, text, ui_rtl);
         });
         full.textures_delta.clear();

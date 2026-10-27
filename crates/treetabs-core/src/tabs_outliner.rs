@@ -47,19 +47,31 @@ impl Warnings {
 }
 
 /// Parse Tabs Outliner JSON text.
+///
+/// # Errors
+///
+/// When the text is not JSON or not a Tabs Outliner entry array.
 pub fn parse_str(s: &str) -> Result<(Tree, Warnings), ImportError> {
     let v: Value = serde_json::from_str(s)?;
     from_value(&v)
 }
 
 /// Build a tree from an already parsed entry array.
+///
+/// # Errors
+///
+/// [`ImportError::NotAnArray`] when `v` is not an entry array. Entries
+/// that cannot be read are skipped and reported in the warnings.
 pub fn from_value(v: &Value) -> Result<(Tree, Warnings), ImportError> {
     let entries = v.as_array().ok_or(ImportError::NotAnArray)?;
     let mut warn = Warnings::default();
     let mut tree = Tree::default();
 
     // stack[d] is the open node at depth d; stack[0] is the session root.
-    let mut stack: Vec<Node> = vec![std::mem::replace(&mut tree.root, Node::new(NodeKind::Session))];
+    let mut stack: Vec<Node> = vec![std::mem::replace(
+        &mut tree.root,
+        Node::new(NodeKind::Session),
+    )];
 
     fn close_to(stack: &mut Vec<Node>, depth: usize) {
         while stack.len() > depth {
@@ -109,7 +121,11 @@ pub fn from_value(v: &Value) -> Result<(Tree, Warnings), ImportError> {
                 let path: Vec<usize> = a
                     .get(2)
                     .and_then(Value::as_array)
-                    .map(|p| p.iter().filter_map(|x| x.as_u64().map(|x| x as usize)).collect())
+                    .map(|p| {
+                        p.iter()
+                            .filter_map(|x| x.as_u64().and_then(|x| usize::try_from(x).ok()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 if path.is_empty() {
                     warn.push(format!("entry {i}: missing path, attached to root"));
@@ -142,6 +158,11 @@ pub fn from_value(v: &Value) -> Result<(Tree, Warnings), ImportError> {
 }
 
 fn as_i64_lossy(v: &Value) -> Option<i64> {
+    // Saturating: Tabs Outliner stores ids and times as JS numbers.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "saturating float to int is the intent"
+    )]
     v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
 }
 
@@ -160,7 +181,8 @@ fn take_string(m: &mut Map<String, Value>, k: &str) -> Option<String> {
 fn node_from_raw(raw: &Map<String, Value>) -> Node {
     let mut raw = raw.clone();
     let kind = NodeKind::from_tabs_outliner(raw.get("type").and_then(Value::as_str));
-    if raw.get("type").is_some_and(Value::is_string) || raw.get("type").is_some_and(Value::is_null) {
+    if raw.get("type").is_some_and(Value::is_string) || raw.get("type").is_some_and(Value::is_null)
+    {
         raw.remove("type");
     }
     let mut n = Node::new(kind);
@@ -192,7 +214,10 @@ fn node_from_raw(raw: &Map<String, Value>) -> Node {
             n.custom_title = take_string(&mut m, "customTitle");
             n.custom_favicon = take_string(&mut m, "customFavicon");
             // `relicons: []` is on nearly every node; leave it out when empty.
-            if m.get("relicons").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+            if m.get("relicons")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
                 m.remove("relicons");
             }
             n.marks = m;
@@ -313,7 +338,10 @@ mod tests {
                 _ => {}
             }
         }
-        let (mut a, mut b) = (serde_json::to_value(&t).unwrap(), serde_json::to_value(&t2).unwrap());
+        let (mut a, mut b) = (
+            serde_json::to_value(&t).unwrap(),
+            serde_json::to_value(&t2).unwrap(),
+        );
         strip(&mut a);
         strip(&mut b);
         assert_eq!(a, b);

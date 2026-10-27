@@ -2,6 +2,7 @@
 name = "treetabs-sync"
 description = "treetabs server (store owner), client connection and the native messaging host"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 
@@ -17,3 +18,6 @@ thiserror.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger = "0.11"
+
+[lints]
+workspace = true

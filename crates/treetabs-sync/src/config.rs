@@ -21,7 +21,9 @@ impl Config {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into())
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".".into())
 }
 
 pub fn user_config_path() -> PathBuf {

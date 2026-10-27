@@ -8,5 +8,5 @@ pub mod config;
 pub mod server;
 
 pub use client::{Connection, connect};
-pub use treetabs_core::protocol;
 pub use protocol::{ClientMsg, Role, ServerMsg};
+pub use treetabs_core::protocol;

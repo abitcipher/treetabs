@@ -44,8 +44,10 @@ impl Transport for Socket {
     fn reconnect(&mut self) -> Result<(), String> {
         self.conn = None;
         let ctx = self.ctx.clone();
-        let c = treetabs_sync::connect(&self.dir, Role::Viewer, "gui", move || ctx.request_repaint())
-            .map_err(|e| e.to_string())?;
+        let c = treetabs_sync::connect(&self.dir, Role::Viewer, "gui", move || {
+            ctx.request_repaint()
+        })
+        .map_err(|e| e.to_string())?;
         self.conn = Some(c);
         Ok(())
     }
@@ -62,18 +64,31 @@ impl Transport for Socket {
         self.conn.as_ref().is_some_and(Connection::is_server)
     }
 
-    fn save_file(&mut self, name: &str, _mime: &str, data: &[u8]) -> Result<Option<String>, String> {
-        let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() else { return Ok(None) };
+    fn save_file(
+        &mut self,
+        name: &str,
+        _mime: &str,
+        data: &[u8],
+    ) -> Result<Option<String>, String> {
+        let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() else {
+            return Ok(None);
+        };
         std::fs::write(&path, data).map_err(|e| e.to_string())?;
         Ok(Some(path.display().to_string()))
     }
 
     fn open_file(&mut self) {
-        let picked = rfd::FileDialog::new().add_filter("JSON", &["json"]).add_filter("*", &["*"]).pick_file();
+        let picked = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .add_filter("*", &["*"])
+            .pick_file();
         if let Some(path) = picked {
             match std::fs::read(&path) {
                 Ok(data) => {
-                    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    let name = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    );
                     self.picked = Some((name, data));
                 }
                 Err(e) => log::warn!("cannot read {}: {e}", path.display()),
@@ -126,8 +141,10 @@ fn main() -> eframe::Result {
             .with_inner_size([1200.0, 800.0])
             .with_app_id("treetabs")
             .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!("../../../extension/static/icons/icon256.png"))
-                    .unwrap_or_default(),
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../../../extension/static/icons/icon256.png"
+                ))
+                .unwrap_or_default(),
             ),
         ..Default::default()
     };
@@ -136,7 +153,12 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            let mut t = Socket { dir, ctx: cc.egui_ctx.clone(), conn: None, picked: None };
+            let mut t = Socket {
+                dir,
+                ctx: cc.egui_ctx.clone(),
+                conn: None,
+                picked: None,
+            };
             let _ = t.reconnect();
             Ok(Box::new(treetabs_ui::App::new(Box::new(t), import)))
         }),

@@ -2301,7 +2301,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "treetabs-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "js-sys",
@@ -2314,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "treetabs-extension-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "treetabs-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui",

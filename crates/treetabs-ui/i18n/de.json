@@ -169,6 +169,7 @@
  "{n} browser(s) connected": "{n} Browser verbunden",
  "{n} days": "{n} Tage",
  "{n} match(es); double-click opens in the browser": "{n} Treffer; Doppelklick öffnet im Browser",
+ "{n} nodes selected": "{n} Elemente ausgewählt",
  "{title}: {n} nodes added at the end": "{title}: {n} Elemente am Ende hinzugefügt",
  "{title}: {n} nodes added at the end ({warnings} warnings)": "{title}: {n} Elemente am Ende hinzugefügt ({warnings} Warnungen)"
 }

@@ -17,7 +17,12 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Treetabs, Format::TabsOutliner, Format::BookmarksHtml, Format::Markdown];
+    pub const ALL: [Format; 4] = [
+        Format::Treetabs,
+        Format::TabsOutliner,
+        Format::BookmarksHtml,
+        Format::Markdown,
+    ];
 
     /// File name for an export made on `date` (`YYYY-MM-DD`).
     pub fn file_name(self, date: &str) -> String {
@@ -40,8 +45,12 @@ impl Format {
     /// The tree in this format.
     pub fn render(self, tree: &Tree) -> String {
         match self {
-            Format::Treetabs => crate::to_portable_json(tree, true).unwrap_or_default(),
-            Format::TabsOutliner => serde_json::to_string(&crate::tabs_outliner::to_value(tree)).unwrap_or_default(),
+            Format::Treetabs => {
+                crate::to_portable_json(tree, crate::JsonStyle::Pretty).unwrap_or_default()
+            }
+            Format::TabsOutliner => {
+                serde_json::to_string(&crate::tabs_outliner::to_value(tree)).unwrap_or_default()
+            }
             Format::BookmarksHtml => bookmarks_html(tree),
             Format::Markdown => markdown(tree),
         }
@@ -49,7 +58,10 @@ impl Format {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn is_folder(n: &Node) -> bool {
@@ -74,7 +86,9 @@ pub fn bookmarks_html(tree: &Tree) -> String {
             if n.children.is_empty() {
                 out.push_str(&format!("{pad}{link}"));
             } else {
-                out.push_str(&format!("{pad}<DT><H3>{title}</H3>\n{pad}<DL><p>\n{pad}    {link}"));
+                out.push_str(&format!(
+                    "{pad}<DT><H3>{title}</H3>\n{pad}<DL><p>\n{pad}    {link}"
+                ));
                 for c in &n.children {
                     go(c, depth + 1, out);
                 }

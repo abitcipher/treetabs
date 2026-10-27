@@ -23,7 +23,7 @@ pub struct BackupInfo {
     /// File name, which is also its id for [`read`].
     pub name: String,
     /// When it was written (ms since the epoch).
-    pub at: u64,
+    pub at: i64,
     pub bytes: u64,
 }
 
@@ -35,9 +35,9 @@ fn dir_of(store: &Path, kind: BackupKind) -> PathBuf {
 }
 
 /// `YYYY-MM-DD` (UTC) of a time in ms since the epoch.
-pub fn date(ms: u64) -> String {
+pub fn date(ms: i64) -> String {
     // Howard Hinnant's days-to-civil algorithm.
-    let z = (ms / 86_400_000) as i64 + 719_468;
+    let z = ms.div_euclid(86_400_000) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -50,15 +50,17 @@ pub fn date(ms: u64) -> String {
 }
 
 /// Local date and time of a time in ms since the epoch: `YYYY-MM-DD HH:MM`.
-pub fn local_time(ms: u64) -> String {
+pub fn local_time(ms: i64) -> String {
     use chrono::TimeZone;
-    match chrono::Local.timestamp_millis_opt(ms as i64) {
-        chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => t.format("%Y-%m-%d %H:%M").to_string(),
+    match chrono::Local.timestamp_millis_opt(ms) {
+        chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => {
+            t.format("%Y-%m-%d %H:%M").to_string()
+        }
         chrono::LocalResult::None => date(ms),
     }
 }
 
-fn daily_path(store: &Path, now_ms: u64) -> PathBuf {
+fn daily_path(store: &Path, now_ms: i64) -> PathBuf {
     // One file per local day.
     let day = local_time(now_ms)[..10].to_owned();
     dir_of(store, BackupKind::Daily).join(format!("treetabs-{day}.json"))
@@ -66,7 +68,16 @@ fn daily_path(store: &Path, now_ms: u64) -> PathBuf {
 
 /// Write today's export unless it exists. Keeps the newest `keep` exports
 /// (0 turns exports off). Returns the path written, if any.
-pub fn export_daily(store: &Path, tree: &Tree, keep: usize, now_ms: u64) -> io::Result<Option<PathBuf>> {
+///
+/// # Errors
+///
+/// When the export folder or file cannot be written, or old copies cannot be removed.
+pub fn export_daily(
+    store: &Path,
+    tree: &Tree,
+    keep: usize,
+    now_ms: i64,
+) -> io::Result<Option<PathBuf>> {
     if keep == 0 || daily_path(store, now_ms).exists() {
         return Ok(None);
     }
@@ -74,16 +85,24 @@ pub fn export_daily(store: &Path, tree: &Tree, keep: usize, now_ms: u64) -> io::
 }
 
 /// Write (or overwrite) today's export now.
-pub fn export_now(store: &Path, tree: &Tree, keep: usize, now_ms: u64) -> io::Result<PathBuf> {
+///
+/// # Errors
+///
+/// When the export folder or file cannot be written, or old copies cannot be removed.
+pub fn export_now(store: &Path, tree: &Tree, keep: usize, now_ms: i64) -> io::Result<PathBuf> {
     let path = daily_path(store, now_ms);
     fs::create_dir_all(path.parent().expect("has a parent"))?;
-    crate::save_portable(tree, &path, false)?;
+    crate::save_portable(tree, &path, crate::JsonStyle::Compact)?;
     prune(store, keep.max(1))?;
     Ok(path)
 }
 
 fn prune(store: &Path, keep: usize) -> io::Result<()> {
-    let mut names: Vec<String> = list(store).into_iter().filter(|b| b.kind == BackupKind::Daily).map(|b| b.name).collect();
+    let mut names: Vec<String> = list(store)
+        .into_iter()
+        .filter(|b| b.kind == BackupKind::Daily)
+        .map(|b| b.name)
+        .collect();
     // Names sort by date; newest first.
     names.sort_unstable_by(|a, b| b.cmp(a));
     for old in names.iter().skip(keep) {
@@ -96,7 +115,9 @@ fn prune(store: &Path, keep: usize) -> io::Result<()> {
 pub fn list(store: &Path) -> Vec<BackupInfo> {
     let mut out = Vec::new();
     for kind in [BackupKind::Daily, BackupKind::Snapshot] {
-        let Ok(entries) = fs::read_dir(dir_of(store, kind)) else { continue };
+        let Ok(entries) = fs::read_dir(dir_of(store, kind)) else {
+            continue;
+        };
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if !name.ends_with(".json") {
@@ -107,25 +128,59 @@ pub fn list(store: &Path) -> Vec<BackupInfo> {
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_millis() as u64);
-            out.push(BackupInfo { kind, name, at, bytes: meta.len() });
+                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+            out.push(BackupInfo {
+                kind,
+                name,
+                at,
+                bytes: meta.len(),
+            });
         }
     }
     out.sort_by_key(|b| std::cmp::Reverse(b.at));
     out
 }
 
+/// Why a backup could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadBackupError {
+    /// Not a plain file name (has a path separator or starts with a dot).
+    #[error("bad backup name: {0}")]
+    BadName(String),
+    /// No daily copy or snapshot has this name.
+    #[error("no backup named {0}")]
+    NotFound(String),
+    /// The file exists but does not load.
+    #[error("backup {name}: {source}")]
+    Load {
+        name: String,
+        #[source]
+        source: crate::LoadError,
+    },
+}
+
 /// Load one copy by its name from [`list`].
-pub fn read(store: &Path, name: &str) -> Result<Tree, String> {
+///
+/// # Errors
+///
+/// [`ReadBackupError::BadName`] for names that could leave the backup
+/// folders, [`ReadBackupError::NotFound`] when there is no such copy, and
+/// [`ReadBackupError::Load`] when the file does not load.
+pub fn read(store: &Path, name: &str) -> Result<Tree, ReadBackupError> {
     if name.contains(['/', '\\']) || name.starts_with('.') {
-        return Err(format!("bad backup name: {name}"));
+        return Err(ReadBackupError::BadName(name.to_owned()));
     }
     let path = [BackupKind::Daily, BackupKind::Snapshot]
         .into_iter()
         .map(|k| dir_of(store, k).join(name))
         .find(|p| p.is_file())
-        .ok_or_else(|| format!("no backup named {name}"))?;
-    crate::load(&path).map(|l| l.tree).map_err(|e| e.to_string())
+        .ok_or_else(|| ReadBackupError::NotFound(name.to_owned()))?;
+    crate::load(&path)
+        .map(|l| l.tree)
+        .map_err(|source| ReadBackupError::Load {
+            name: name.to_owned(),
+            source,
+        })
 }
 
 #[cfg(test)]
@@ -147,17 +202,31 @@ mod tests {
         let day = 86_400_000;
         let t0 = 1_792_890_000_000;
         assert!(export_daily(&dir, &tree, 3, t0).unwrap().is_some());
-        assert!(export_daily(&dir, &tree, 3, t0 + 1000).unwrap().is_none(), "same day");
+        assert!(
+            export_daily(&dir, &tree, 3, t0 + 1000).unwrap().is_none(),
+            "same day"
+        );
         for i in 1..5 {
             export_daily(&dir, &tree, 3, t0 + i * day).unwrap();
         }
         let mut names: Vec<_> = list(&dir).into_iter().map(|b| b.name).collect();
         names.sort();
-        let name = |i: u64| format!("treetabs-{}.json", &local_time(t0 + i * day)[..10]);
+        let name = |i: i64| format!("treetabs-{}.json", &local_time(t0 + i * day)[..10]);
         assert_eq!(names, [name(2), name(3), name(4)]);
         assert!(read(&dir, &name(3)).is_ok());
-        assert!(read(&dir, "../tree.json").is_err());
-        assert_eq!(export_daily(&dir, &tree, 0, t0 + 9 * day).unwrap(), None, "0 = off");
+        assert!(matches!(
+            read(&dir, "../tree.json"),
+            Err(ReadBackupError::BadName(_))
+        ));
+        assert!(matches!(
+            read(&dir, "treetabs-1999-01-01.json"),
+            Err(ReadBackupError::NotFound(_))
+        ));
+        assert_eq!(
+            export_daily(&dir, &tree, 0, t0 + 9 * day).unwrap(),
+            None,
+            "0 = off"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

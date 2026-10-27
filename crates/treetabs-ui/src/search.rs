@@ -1,8 +1,8 @@
 //! Search over the tree: words, filters, duplicates, and match highlighting.
 
+use crate::i18n::tr;
 use eframe::egui::{self, Color32, text::LayoutJob};
 use std::collections::HashMap;
-use crate::i18n::tr;
 use treetabs_core::{Node, NodeKind};
 
 /// Stop collecting after this many hits.
@@ -38,7 +38,11 @@ impl Filter {
             Filter::Open => matches!(n.kind, NodeKind::Tab | NodeKind::Window),
             Filter::Saved => matches!(
                 n.kind,
-                NodeKind::SavedTab | NodeKind::SavedWindow | NodeKind::WaitingTab | NodeKind::WaitingWindow | NodeKind::AttachWaitingTab
+                NodeKind::SavedTab
+                    | NodeKind::SavedWindow
+                    | NodeKind::WaitingTab
+                    | NodeKind::WaitingWindow
+                    | NodeKind::AttachWaitingTab
             ),
         }
     }
@@ -75,7 +79,10 @@ fn matches(n: &Node, words: &[String]) -> bool {
         return true;
     }
     let mut text = n.display_title().to_lowercase();
-    for extra in [n.title.as_deref(), n.url.as_deref(), n.note.as_deref()].into_iter().flatten() {
+    for extra in [n.title.as_deref(), n.url.as_deref(), n.note.as_deref()]
+        .into_iter()
+        .flatten()
+    {
         text.push('\n');
         text.push_str(&extra.to_lowercase());
     }
@@ -97,7 +104,10 @@ pub fn run(root: &Node, query: &str, filter: Filter, version: u64) -> Results {
     let mut truncated = false;
     let mut at = Vec::new();
     let mut parents: Vec<String> = Vec::new();
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "recursive helper: the walk state is passed down explicitly"
+    )]
     fn go(
         n: &Node,
         words: &[String],
@@ -114,9 +124,16 @@ pub fn run(root: &Node, query: &str, filter: Filter, version: u64) -> Results {
                 return;
             }
             at.push(i);
-            let dup_ok = dups.is_none_or(|d| c.url.as_deref().is_some_and(|u| d.get(normalize_url(u)).copied().unwrap_or(0) > 1));
+            let dup_ok = dups.is_none_or(|d| {
+                c.url
+                    .as_deref()
+                    .is_some_and(|u| d.get(normalize_url(u)).copied().unwrap_or(0) > 1)
+            });
             if filter.keeps(c) && dup_ok && matches(c, words) {
-                hits.push(Hit { at: at.clone(), parents: breadcrumbs(parents) });
+                hits.push(Hit {
+                    at: at.clone(),
+                    parents: breadcrumbs(parents),
+                });
             }
             if !c.children.is_empty() {
                 parents.push(crate::i18n::title(c));
@@ -126,13 +143,33 @@ pub fn run(root: &Node, query: &str, filter: Filter, version: u64) -> Results {
             at.pop();
         }
     }
-    go(root, &words, filter, dup_counts.as_ref(), &mut at, &mut parents, &mut hits, &mut truncated);
+    go(
+        root,
+        &words,
+        filter,
+        dup_counts.as_ref(),
+        &mut at,
+        &mut parents,
+        &mut hits,
+        &mut truncated,
+    );
     if filter == Filter::Duplicates {
         // Copies next to each other.
-        let url = |h: &Hit| resolve(root, &h.at).and_then(|n| n.url.as_deref()).map(normalize_url).unwrap_or("").to_owned();
+        let url = |h: &Hit| {
+            resolve(root, &h.at)
+                .and_then(|n| n.url.as_deref())
+                .map(normalize_url)
+                .unwrap_or("")
+                .to_owned()
+        };
         hits.sort_by_cached_key(url);
     }
-    Results { key: (query.to_owned(), filter, version), hits, truncated, words }
+    Results {
+        key: (query.to_owned(), filter, version),
+        hits,
+        truncated,
+        words,
+    }
 }
 
 /// For duplicate results: every copy but one per page. The one kept is the
@@ -141,7 +178,9 @@ pub fn extra_copies(root: &Node, hits: &[Hit]) -> Vec<treetabs_core::NodeId> {
     let mut groups: Vec<(&str, Vec<&Node>)> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
     for h in hits {
-        let Some(n) = resolve(root, &h.at) else { continue };
+        let Some(n) = resolve(root, &h.at) else {
+            continue;
+        };
         let Some(u) = n.url.as_deref() else { continue };
         let u = normalize_url(u);
         let i = *index.entry(u).or_insert_with(|| {
@@ -152,8 +191,17 @@ pub fn extra_copies(root: &Node, hits: &[Hit]) -> Vec<treetabs_core::NodeId> {
     }
     let mut out = Vec::new();
     for (_, copies) in groups {
-        let keep = copies.iter().position(|n| n.kind == NodeKind::Tab).unwrap_or(0);
-        out.extend(copies.iter().enumerate().filter(|(i, _)| *i != keep).map(|(_, n)| n.id));
+        let keep = copies
+            .iter()
+            .position(|n| n.kind == NodeKind::Tab)
+            .unwrap_or(0);
+        out.extend(
+            copies
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != keep)
+                .map(|(_, n)| n.id),
+        );
     }
     out
 }
@@ -161,7 +209,11 @@ pub fn extra_copies(root: &Node, hits: &[Hit]) -> Vec<treetabs_core::NodeId> {
 /// "Window › docs", shortened to the last three parents.
 fn breadcrumbs(parents: &[String]) -> String {
     let short = |s: &String| {
-        if s.chars().count() > 30 { format!("{}…", s.chars().take(29).collect::<String>()) } else { s.clone() }
+        if s.chars().count() > 30 {
+            format!("{}…", s.chars().take(29).collect::<String>())
+        } else {
+            s.clone()
+        }
     };
     let skip = parents.len().saturating_sub(3);
     let mut out: Vec<String> = parents[skip..].iter().map(short).collect();
@@ -180,11 +232,19 @@ pub fn resolve<'a>(root: &'a Node, at: &[usize]) -> Option<&'a Node> {
 }
 
 /// `text` with the matching words highlighted.
-pub fn highlighted(ui: &egui::Ui, text: &str, words: &[String], format: egui::TextFormat) -> LayoutJob {
+pub fn highlighted(
+    ui: &egui::Ui,
+    text: &str,
+    words: &[String],
+    format: egui::TextFormat,
+) -> LayoutJob {
     // Mark matches per char, comparing lowercased chars (byte offsets of a
     // lowercased string can differ from the original's).
     let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let lower: Vec<char> = chars.iter().map(|(_, c)| c.to_lowercase().next().unwrap_or(*c)).collect();
+    let lower: Vec<char> = chars
+        .iter()
+        .map(|(_, c)| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
     let mut marked = vec![false; chars.len()];
     for w in words {
         let w: Vec<char> = w.chars().collect();
@@ -193,7 +253,9 @@ pub fn highlighted(ui: &egui::Ui, text: &str, words: &[String], format: egui::Te
         }
         for start in 0..=lower.len() - w.len() {
             if lower[start..start + w.len()] == w[..] {
-                marked[start..start + w.len()].iter_mut().for_each(|m| *m = true);
+                marked[start..start + w.len()]
+                    .iter_mut()
+                    .for_each(|m| *m = true);
             }
         }
     }
@@ -214,7 +276,11 @@ pub fn highlighted(ui: &egui::Ui, text: &str, words: &[String], format: egui::Te
             i += 1;
         }
     }
-    let bg = if ui.visuals().dark_mode { Color32::from_rgb(110, 90, 20) } else { Color32::from_rgb(255, 225, 110) };
+    let bg = if ui.visuals().dark_mode {
+        Color32::from_rgb(110, 90, 20)
+    } else {
+        Color32::from_rgb(255, 225, 110)
+    };
     let mut job = LayoutJob::default();
     let mut i = 0;
     while i < chars.len() {
@@ -261,17 +327,35 @@ mod tests {
                     "Work",
                     None,
                     vec![
-                        node(NodeKind::Tab, "Rust docs", Some("https://doc.rust-lang.org/"), vec![]),
-                        node(NodeKind::SavedTab, "Rust Book", Some("https://doc.rust-lang.org/book#intro"), vec![]),
+                        node(
+                            NodeKind::Tab,
+                            "Rust docs",
+                            Some("https://doc.rust-lang.org/"),
+                            vec![],
+                        ),
+                        node(
+                            NodeKind::SavedTab,
+                            "Rust Book",
+                            Some("https://doc.rust-lang.org/book#intro"),
+                            vec![],
+                        ),
                     ],
                 ),
-                node(NodeKind::SavedTab, "Docs again", Some("https://doc.rust-lang.org"), vec![]),
+                node(
+                    NodeKind::SavedTab,
+                    "Docs again",
+                    Some("https://doc.rust-lang.org"),
+                    vec![],
+                ),
             ],
         )
     }
 
     fn titles(root: &Node, r: &Results) -> Vec<String> {
-        r.hits.iter().map(|h| resolve(root, &h.at).unwrap().display_title().to_owned()).collect()
+        r.hits
+            .iter()
+            .map(|h| resolve(root, &h.at).unwrap().display_title().to_owned())
+            .collect()
     }
 
     #[test]
@@ -288,7 +372,10 @@ mod tests {
     fn filters() {
         let t = tree();
         assert_eq!(titles(&t, &run(&t, "rust", Filter::Open, 0)), ["Rust docs"]);
-        assert_eq!(titles(&t, &run(&t, "", Filter::Saved, 0)), ["Rust Book", "Docs again"]);
+        assert_eq!(
+            titles(&t, &run(&t, "", Filter::Saved, 0)),
+            ["Rust Book", "Docs again"]
+        );
         // Trailing slash and fragment don't make a page different.
         let mut d = titles(&t, &run(&t, "", Filter::Duplicates, 0));
         d.sort();
@@ -309,9 +396,18 @@ mod tests {
     fn highlight_takes_whole_arabic_words() {
         let ctx = egui::Context::default();
         let mut out = ctx.run_ui(Default::default(), |ui| {
-            let job = highlighted(ui, "مرحبا بالعالم", &words("بال"), egui::TextFormat::default());
-            let marked: Vec<&str> =
-                job.sections.iter().filter(|s| s.format.background != Color32::TRANSPARENT).map(|s| &job.text[s.byte_range.start.0..s.byte_range.end.0]).collect();
+            let job = highlighted(
+                ui,
+                "مرحبا بالعالم",
+                &words("بال"),
+                egui::TextFormat::default(),
+            );
+            let marked: Vec<&str> = job
+                .sections
+                .iter()
+                .filter(|s| s.format.background != Color32::TRANSPARENT)
+                .map(|s| &job.text[s.byte_range.start.0..s.byte_range.end.0])
+                .collect();
             assert_eq!(marked, ["بالعالم"]);
         });
         out.textures_delta.clear();
@@ -322,8 +418,12 @@ mod tests {
         let ctx = egui::Context::default();
         let mut out = ctx.run_ui(Default::default(), |ui| {
             let job = highlighted(ui, "Привет Мир", &words("мир"), egui::TextFormat::default());
-            let marked: Vec<&str> =
-                job.sections.iter().filter(|s| s.format.background != Color32::TRANSPARENT).map(|s| &job.text[s.byte_range.start.0..s.byte_range.end.0]).collect();
+            let marked: Vec<&str> = job
+                .sections
+                .iter()
+                .filter(|s| s.format.background != Color32::TRANSPARENT)
+                .map(|s| &job.text[s.byte_range.start.0..s.byte_range.end.0])
+                .collect();
             assert_eq!(marked, ["Мир"]);
         });
         out.textures_delta.clear();

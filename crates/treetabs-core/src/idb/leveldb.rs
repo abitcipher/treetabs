@@ -66,14 +66,26 @@ impl Snapshot {
 }
 
 /// Read every table and log file in `dir`.
+///
+/// # Errors
+///
+/// When the folder cannot be read or holds no LevelDB files. Damaged
+/// records are skipped and reported in [`Snapshot::warnings`].
 pub fn read_dir(dir: &Path) -> Result<Snapshot, LevelDbError> {
     read_dir_with(dir, false)
 }
 
 /// Like [`read_dir`]; with `keep_history` older versions of keys are kept
 /// in [`Snapshot::history`] (as far as LevelDB has not compacted them away).
+///
+/// # Errors
+///
+/// As [`read_dir`].
 pub fn read_dir_with(dir: &Path, keep_history: bool) -> Result<Snapshot, LevelDbError> {
-    let mut snap = Snapshot { history: keep_history.then(Vec::new), ..Default::default() };
+    let mut snap = Snapshot {
+        history: keep_history.then(Vec::new),
+        ..Default::default()
+    };
     let mut files: Vec<_> = fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())
@@ -81,7 +93,11 @@ pub fn read_dir_with(dir: &Path, keep_history: bool) -> Result<Snapshot, LevelDb
     files.sort();
     let mut found = false;
     for p in files {
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_owned();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_owned();
         let res = match p.extension().and_then(|e| e.to_str()) {
             Some("ldb") | Some("sst") => {
                 found = true;
@@ -123,8 +139,17 @@ pub(crate) fn varint(b: &[u8], pos: &mut usize) -> Result<u64, String> {
     }
 }
 
+/// A varint that is a length or an offset into the data.
+fn varint_usize(b: &[u8], pos: &mut usize) -> Result<usize, String> {
+    let v = varint(b, pos)?;
+    usize::try_from(v).map_err(|_| format!("length {v} too large"))
+}
+
 fn slice<'a>(b: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], String> {
-    let end = pos.checked_add(n).filter(|&e| e <= b.len()).ok_or("read past end")?;
+    let end = pos
+        .checked_add(n)
+        .filter(|&e| e <= b.len())
+        .ok_or("read past end")?;
     let s = &b[*pos..end];
     *pos = end;
     Ok(s)
@@ -165,7 +190,8 @@ fn read_log(data: &[u8], snap: &mut Snapshot) -> Result<(), String> {
                     in_fragment = false;
                 }
                 _ => {
-                    snap.warnings.push(format!("log: unexpected record type {kind}"));
+                    snap.warnings
+                        .push(format!("log: unexpected record type {kind}"));
                     in_fragment = false;
                 }
             }
@@ -190,15 +216,18 @@ fn try_apply_batch(b: &[u8], snap: &mut Snapshot) -> Result<(), String> {
     for k in 0..count as u64 {
         let tag = *b.get(pos).ok_or("batch past end")?;
         pos += 1;
-        let klen = varint(b, &mut pos)? as usize;
+        let klen = varint_usize(b, &mut pos)?;
         let key = slice(b, &mut pos, klen)?;
+        let seq = seq
+            .checked_add(k)
+            .ok_or("batch sequence number overflows")?;
         match tag {
             1 => {
-                let vlen = varint(b, &mut pos)? as usize;
+                let vlen = varint_usize(b, &mut pos)?;
                 let v = slice(b, &mut pos, vlen)?;
-                snap.put(key, seq + k, Some(v.to_vec()));
+                snap.put(key, seq, Some(v.to_vec()));
             }
-            0 => snap.put(key, seq + k, None),
+            0 => snap.put(key, seq, None),
             t => return Err(format!("unknown batch tag {t}")),
         }
     }
@@ -222,25 +251,27 @@ fn read_table(data: &[u8], snap: &mut Snapshot) -> Result<(), String> {
     let mut pos = 0;
     let _meta_off = varint(footer, &mut pos)?;
     let _meta_len = varint(footer, &mut pos)?;
-    let idx_off = varint(footer, &mut pos)? as usize;
-    let idx_len = varint(footer, &mut pos)? as usize;
+    let idx_off = varint_usize(footer, &mut pos)?;
+    let idx_len = varint_usize(footer, &mut pos)?;
 
     let index = read_block(data, idx_off, idx_len)?;
     for (_, handle) in block_entries(&index)? {
         let mut p = 0;
-        let off = varint(&handle, &mut p)? as usize;
-        let len = varint(&handle, &mut p)? as usize;
+        let off = varint_usize(&handle, &mut p)?;
+        let len = varint_usize(&handle, &mut p)?;
         let block = match read_block(data, off, len) {
             Ok(b) => b,
             Err(e) => {
-                snap.warnings.push(format!("table: data block at {off}: {e}"));
+                snap.warnings
+                    .push(format!("table: data block at {off}: {e}"));
                 continue;
             }
         };
         let entries = match block_entries(&block) {
             Ok(e) => e,
             Err(e) => {
-                snap.warnings.push(format!("table: data block at {off}: {e}"));
+                snap.warnings
+                    .push(format!("table: data block at {off}: {e}"));
                 continue;
             }
         };
@@ -262,8 +293,10 @@ fn read_table(data: &[u8], snap: &mut Snapshot) -> Result<(), String> {
 }
 
 fn read_block(data: &[u8], off: usize, len: usize) -> Result<Vec<u8>, String> {
-    let raw = data.get(off..off + len).ok_or("block past end of file")?;
-    let compression = *data.get(off + len).ok_or("missing block trailer")?;
+    // Offset and length come from the file: a damaged one may overflow.
+    let end = off.checked_add(len).ok_or("block length overflows")?;
+    let raw = data.get(off..end).ok_or("block past end of file")?;
+    let compression = *data.get(end).ok_or("missing block trailer")?;
     match compression {
         0 => Ok(raw.to_vec()),
         1 => snap::raw::Decoder::new()
@@ -280,17 +313,21 @@ fn block_entries(block: &[u8]) -> Result<KeyValues, String> {
         return Err("block too small".into());
     }
     let n_restarts = u32::from_le_bytes(block[block.len() - 4..].try_into().unwrap()) as usize;
+    let restarts_len = n_restarts
+        .checked_mul(4)
+        .and_then(|r| r.checked_add(4))
+        .ok_or("bad restart count")?;
     let end = block
         .len()
-        .checked_sub(4 + 4 * n_restarts)
+        .checked_sub(restarts_len)
         .ok_or("bad restart count")?;
     let mut out = Vec::new();
     let mut key: Vec<u8> = Vec::new();
     let mut pos = 0;
     while pos < end {
-        let shared = varint(block, &mut pos)? as usize;
-        let non_shared = varint(block, &mut pos)? as usize;
-        let vlen = varint(block, &mut pos)? as usize;
+        let shared = varint_usize(block, &mut pos)?;
+        let non_shared = varint_usize(block, &mut pos)?;
+        let vlen = varint_usize(block, &mut pos)?;
         if shared > key.len() {
             return Err("bad shared key prefix".into());
         }
@@ -316,6 +353,33 @@ mod tests {
         b.extend_from_slice(&[1, 1, b'k', 1, b'b']);
         try_apply_batch(&b, &mut snap).unwrap();
         snap.put(b"k", 1, Some(b"old".to_vec()));
-        assert_eq!(snap.records[b"k".as_slice()].value.as_deref(), Some(b"b".as_slice()));
+        assert_eq!(
+            snap.records[b"k".as_slice()].value.as_deref(),
+            Some(b"b".as_slice())
+        );
+    }
+}
+
+#[cfg(test)]
+mod damaged_input_tests {
+    use super::*;
+
+    #[test]
+    fn block_offset_and_length_that_overflow_are_an_error() {
+        let data = [0u8; 16];
+        assert!(read_block(&data, usize::MAX, 2).is_err());
+        assert!(read_block(&data, 8, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn batch_sequence_number_that_overflows_is_an_error() {
+        // seq = u64::MAX, two records: the second sequence number overflows.
+        let mut b = u64::MAX.to_le_bytes().to_vec();
+        b.extend_from_slice(&2u32.to_le_bytes());
+        for _ in 0..2 {
+            b.extend_from_slice(&[0, 1, b'k']); // deletion of key "k"
+        }
+        let mut snap = Snapshot::default();
+        assert!(try_apply_batch(&b, &mut snap).is_err());
     }
 }

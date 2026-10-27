@@ -93,23 +93,38 @@ const DIALOG_TEXT: f32 = 14.0;
 /// A new interface scale waits this long after the last wheel or key step.
 const SCALE_DELAY: f64 = 0.6;
 
-/// The settings window's own text styles (see [`DIALOG_TEXT`]).
+/// The settings window's own text styles (see `DIALOG_TEXT`).
 pub fn dialog_style(style: &mut egui::Style) {
     use egui::{FontFamily, FontId, TextStyle};
     let s = DIALOG_TEXT;
     style.text_styles = [
-        (TextStyle::Small, FontId::new(s * 0.8, FontFamily::Proportional)),
+        (
+            TextStyle::Small,
+            FontId::new(s * 0.8, FontFamily::Proportional),
+        ),
         (TextStyle::Body, FontId::new(s, FontFamily::Proportional)),
         (TextStyle::Button, FontId::new(s, FontFamily::Proportional)),
-        (TextStyle::Heading, FontId::new(s * 1.25, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(s * 0.9, FontFamily::Monospace)),
+        (
+            TextStyle::Heading,
+            FontId::new(s * 1.25, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(s * 0.9, FontFamily::Monospace),
+        ),
     ]
     .into();
 }
 
 /// Mouse wheel over `resp` moves `value` by `step` per notch (up = more).
 /// The wheel is taken from the scroll area underneath. Returns true on change.
-pub fn wheel<T: egui::emath::Numeric>(ui: &egui::Ui, resp: &egui::Response, value: &mut T, step: f64, range: std::ops::RangeInclusive<f64>) -> bool {
+pub fn wheel<T: egui::emath::Numeric>(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    value: &mut T,
+    step: f64,
+    range: std::ops::RangeInclusive<f64>,
+) -> bool {
     if !resp.hovered() {
         return false;
     }
@@ -117,12 +132,21 @@ pub fn wheel<T: egui::emath::Numeric>(ui: &egui::Ui, resp: &egui::Response, valu
         i.events
             .iter()
             .filter_map(|e| match e {
-                egui::Event::MouseWheel { unit, delta, modifiers, .. } if !modifiers.command => Some(match unit {
+                egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                    ..
+                } if !modifiers.command => Some(match unit {
                     egui::MouseWheelUnit::Line => delta.y + delta.x,
                     // A mouse notch is 50-120 px; a touchpad sends a few px at a time.
                     egui::MouseWheelUnit::Point => {
                         let d = delta.y + delta.x;
-                        if d.abs() >= 40.0 { d.signum() } else { d / 40.0 }
+                        if d.abs() >= 40.0 {
+                            d.signum()
+                        } else {
+                            d / 40.0
+                        }
                     }
                     egui::MouseWheelUnit::Page => (delta.y + delta.x) * 5.0,
                 }),
@@ -130,7 +154,8 @@ pub fn wheel<T: egui::emath::Numeric>(ui: &egui::Ui, resp: &egui::Response, valu
             })
             .sum()
     });
-    ui.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+    ui.ctx()
+        .input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
     if notches == 0.0 {
         return false;
     }
@@ -181,21 +206,47 @@ impl Settings {
         ctx.all_styles_mut(|style| {
             // From the theme's own colors each time, so changes don't add up.
             let dark = style.visuals.dark_mode;
-            style.visuals = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-            let target = if dark { egui::Color32::WHITE } else { egui::Color32::BLACK };
+            style.visuals = if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            let target = if dark {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::BLACK
+            };
             let w = &mut style.visuals.widgets;
-            for ws in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            for ws in [
+                &mut w.noninteractive,
+                &mut w.inactive,
+                &mut w.hovered,
+                &mut w.active,
+                &mut w.open,
+            ] {
                 ws.fg_stroke.color = ws.fg_stroke.color.lerp_to_gamma(target, k);
             }
             // Weak (faded) text: less faded with more contrast.
             style.visuals.weak_text_alpha = 0.6 + 0.3 * k;
             use egui::{FontFamily, FontId, TextStyle};
             style.text_styles = [
-                (TextStyle::Small, FontId::new(size * 0.75, FontFamily::Proportional)),
+                (
+                    TextStyle::Small,
+                    FontId::new(size * 0.75, FontFamily::Proportional),
+                ),
                 (TextStyle::Body, FontId::new(size, FontFamily::Proportional)),
-                (TextStyle::Button, FontId::new(size, FontFamily::Proportional)),
-                (TextStyle::Heading, FontId::new(size * 1.4, FontFamily::Proportional)),
-                (TextStyle::Monospace, FontId::new(size * 0.9, FontFamily::Monospace)),
+                (
+                    TextStyle::Button,
+                    FontId::new(size, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Heading,
+                    FontId::new(size * 1.4, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Monospace,
+                    FontId::new(size * 0.9, FontFamily::Monospace),
+                ),
             ]
             .into();
         });
@@ -218,94 +269,125 @@ impl Settings {
     }
 
     fn ui_inner(&mut self, ui: &mut egui::Ui) -> bool {
-        let rtl = i18n::is_rtl();
-        let heading = |ui: &mut egui::Ui, text: &str| {
-            if rtl {
-                let size = egui::vec2(ui.available_width(), ui.text_style_height(&egui::TextStyle::Heading));
-                ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| ui.heading(text));
-            } else {
-                ui.heading(text);
-            }
-        };
-        // One grid row: label, then the control (mirrored when right to left).
-        macro_rules! row {
-            ($ui:expr, $label:expr, $body:block) => {{
-                if rtl {
-                    $body
-                    $ui.label($label);
-                } else {
-                    $ui.label($label);
-                    $body
-                }
-                $ui.end_row();
-            }};
-        }
         let before = self.clone();
-        let pct = |v: f64, _| format!("{:.0}%", v * 100.0);
         heading(ui, tr("Size"));
-        egui::Grid::new("settings-size").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            row!(ui, tr("Interface scale"), {
-                self.scale_slider(ui);
-            });
-            row!(ui, tr("Text size"), {
-                slider(ui, &mut self.font_size, 9.0..=28.0, 0.5, |s| s.suffix(" pt"));
-            });
-            row!(ui, tr("Icon size"), {
-                slider(ui, &mut self.icon_scale, 0.6..=2.0, 0.05, |s| s.custom_formatter(pct));
-            });
-            row!(ui, tr("Row spacing"), {
-                slider(ui, &mut self.row_spacing, 0.0..=12.0, 0.5, |s| s.suffix(" pt"));
-            });
-            row!(ui, tr("Row button size"), {
-                slider(ui, &mut self.row_button_scale, 0.6..=2.5, 0.05, |s| s.custom_formatter(pct));
-            });
-        });
+        self.size_section(ui);
         ui.add_space(6.0);
         heading(ui, tr("Look"));
-        egui::Grid::new("settings-look").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            row!(ui, tr("Language"), {
-                let shown = self.language.map_or_else(|| format!("{} ({})", tr("System"), i18n::shown(i18n::system().name())), |l| i18n::shown(l.name()));
-                egui::ComboBox::from_id_salt("language").selected_text(shown).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.language, None, tr("System"));
-                    for l in Lang::ALL {
-                        ui.selectable_value(&mut self.language, Some(l), i18n::shown(l.name()));
-                    }
-                });
-            });
-            row!(ui, tr("Theme"), {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.theme, Theme::System, tr("System"));
-                    ui.selectable_value(&mut self.theme, Theme::Light, tr("Light"));
-                    ui.selectable_value(&mut self.theme, Theme::Dark, tr("Dark"));
-                });
-            });
-            row!(ui, tr("Contrast"), {
-                slider(ui, &mut self.contrast, 0.0..=1.0, 0.05, |s| s.custom_formatter(pct));
-            });
-            row!(ui, tr("Icons"), {
-                ui.checkbox(&mut self.favicons, tr("Site icons (saved tabs faded)"));
-            });
-            row!(ui, tr("Text styles"), {
-                self.styles(ui);
-            });
-            row!(ui, tr("Row buttons"), {
-                ui.checkbox(&mut self.hover_buttons, tr("rename, close, delete on hover"));
-            });
-        });
+        self.look_section(ui);
         ui.add_space(6.0);
         heading(ui, tr("Deleting"));
-        let dir = if rtl { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
-        ui.with_layout(dir, |ui| {
-            ui.label(tr("Ask before deleting a branch of more than"));
-            let r = ui.add(egui::DragValue::new(&mut self.confirm_branch_over).range(0..=100_000).suffix(format!(" {}", tr("nodes"))));
-            wheel(ui, &r, &mut self.confirm_branch_over, 1.0, 0.0..=100_000.0);
-        });
+        self.deleting_section(ui);
         ui.separator();
         if ui.button(tr("Reset to defaults")).clicked() {
-            let (open, tab, w, h) = (self.panel_open, self.panel_tab, self.details_width, self.details_height);
-            *self = Settings { panel_open: open, panel_tab: tab, details_width: w, details_height: h, ..Settings::default() };
+            self.reset_look();
         }
         *self != before
+    }
+
+    fn size_section(&mut self, ui: &mut egui::Ui) {
+        let pct = |v: f64, _| format!("{:.0}%", v * 100.0);
+        egui::Grid::new("settings-size")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                form_row(ui, tr("Interface scale"), |ui| self.scale_slider(ui));
+                form_row(ui, tr("Text size"), |ui| {
+                    slider(ui, &mut self.font_size, 9.0..=28.0, 0.5, |s| {
+                        s.suffix(" pt")
+                    })
+                });
+                form_row(ui, tr("Icon size"), |ui| {
+                    slider(ui, &mut self.icon_scale, 0.6..=2.0, 0.05, |s| {
+                        s.custom_formatter(pct)
+                    });
+                });
+                form_row(ui, tr("Row spacing"), |ui| {
+                    slider(ui, &mut self.row_spacing, 0.0..=12.0, 0.5, |s| {
+                        s.suffix(" pt")
+                    });
+                });
+                form_row(ui, tr("Row button size"), |ui| {
+                    slider(ui, &mut self.row_button_scale, 0.6..=2.5, 0.05, |s| {
+                        s.custom_formatter(pct)
+                    });
+                });
+            });
+    }
+
+    fn look_section(&mut self, ui: &mut egui::Ui) {
+        let pct = |v: f64, _| format!("{:.0}%", v * 100.0);
+        egui::Grid::new("settings-look")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                form_row(ui, tr("Language"), |ui| self.language_choice(ui));
+                form_row(ui, tr("Theme"), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.theme, Theme::System, tr("System"));
+                        ui.selectable_value(&mut self.theme, Theme::Light, tr("Light"));
+                        ui.selectable_value(&mut self.theme, Theme::Dark, tr("Dark"));
+                    });
+                });
+                form_row(ui, tr("Contrast"), |ui| {
+                    slider(ui, &mut self.contrast, 0.0..=1.0, 0.05, |s| {
+                        s.custom_formatter(pct)
+                    })
+                });
+                form_row(ui, tr("Icons"), |ui| {
+                    ui.checkbox(&mut self.favicons, tr("Site icons (saved tabs faded)"));
+                });
+                form_row(ui, tr("Text styles"), |ui| self.styles(ui));
+                form_row(ui, tr("Row buttons"), |ui| {
+                    ui.checkbox(
+                        &mut self.hover_buttons,
+                        tr("rename, close, delete on hover"),
+                    );
+                });
+            });
+    }
+
+    fn language_choice(&mut self, ui: &mut egui::Ui) {
+        let shown = self.language.map_or_else(
+            || format!("{} ({})", tr("System"), i18n::shown(i18n::system().name())),
+            |l| i18n::shown(l.name()),
+        );
+        egui::ComboBox::from_id_salt("language")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.language, None, tr("System"));
+                for l in Lang::ALL {
+                    ui.selectable_value(&mut self.language, Some(l), i18n::shown(l.name()));
+                }
+            });
+    }
+
+    fn deleting_section(&mut self, ui: &mut egui::Ui) {
+        let dir = if i18n::is_rtl() {
+            egui::Layout::right_to_left(egui::Align::Center)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Center)
+        };
+        ui.with_layout(dir, |ui| {
+            ui.label(tr("Ask before deleting a branch of more than"));
+            let r = ui.add(
+                egui::DragValue::new(&mut self.confirm_branch_over)
+                    .range(0..=100_000)
+                    .suffix(format!(" {}", tr("nodes"))),
+            );
+            wheel(ui, &r, &mut self.confirm_branch_over, 1.0, 0.0..=100_000.0);
+        });
+    }
+
+    /// Back to the default look; the side panel keeps its state and size.
+    fn reset_look(&mut self) {
+        *self = Settings {
+            panel_open: self.panel_open,
+            panel_tab: self.panel_tab,
+            details_width: self.details_width,
+            details_height: self.details_height,
+            ..Settings::default()
+        };
     }
 
     /// Text style switches for tree rows.
@@ -320,7 +402,9 @@ impl Settings {
     fn scale_slider(&mut self, ui: &mut egui::Ui) {
         // The value being chosen, and when it last changed.
         let id = ui.id().with("scale-draft");
-        let (mut draft, mut changed_at) = ui.data(|d| d.get_temp::<(f32, f64)>(id)).unwrap_or((self.ui_scale, 0.0));
+        let (mut draft, mut changed_at) = ui
+            .data(|d| d.get_temp::<(f32, f64)>(id))
+            .unwrap_or((self.ui_scale, 0.0));
         let now = ui.input(|i| i.time);
         let range = 0.5..=2.5;
         let r = ui.add(
@@ -336,15 +420,52 @@ impl Settings {
             if !held && (r.drag_stopped() || now - changed_at >= SCALE_DELAY) {
                 self.ui_scale = draft;
             } else {
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(SCALE_DELAY));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(SCALE_DELAY));
             }
         }
         ui.data_mut(|d| d.insert_temp(id, (draft, changed_at)));
     }
 }
 
+/// A section heading; at the right in a right-to-left interface.
+fn heading(ui: &mut egui::Ui, text: &str) {
+    if i18n::is_rtl() {
+        let size = egui::vec2(
+            ui.available_width(),
+            ui.text_style_height(&egui::TextStyle::Heading),
+        );
+        ui.allocate_ui_with_layout(
+            size,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| ui.heading(text),
+        );
+    } else {
+        ui.heading(text);
+    }
+}
+
+/// One grid row: the label, then the control; mirrored in a right-to-left
+/// interface.
+fn form_row(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::Ui)) {
+    if i18n::is_rtl() {
+        control(ui);
+        ui.label(label);
+    } else {
+        ui.label(label);
+        control(ui);
+    }
+    ui.end_row();
+}
+
 /// A slider that also follows the mouse wheel.
-fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, f: impl FnOnce(egui::Slider) -> egui::Slider) {
+fn slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f64,
+    f: impl FnOnce(egui::Slider) -> egui::Slider,
+) {
     let (lo, hi) = (f64::from(*range.start()), f64::from(*range.end()));
     let r = ui.add(f(egui::Slider::new(value, range).step_by(step)));
     wheel(ui, &r, value, step, lo..=hi);

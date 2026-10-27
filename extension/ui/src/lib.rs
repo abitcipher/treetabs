@@ -24,7 +24,7 @@ struct PortTransport {
     /// `chrome-extension://<id>`
     origin: String,
     /// A file picked for import, once read.
-    picked: Rc<RefCell<Option<(String, Vec<u8>)>>>,
+    picked: PickedFile,
 }
 
 fn chrome_path(p: &str) -> Result<JsValue, JsValue> {
@@ -87,12 +87,17 @@ impl Transport for PortTransport {
         let post: Function = Reflect::get(port, &"postMessage".into())
             .and_then(|f| f.dyn_into().map_err(|_| JsValue::NULL))
             .map_err(|_| "no postMessage".to_string())?;
-        post.call1(port, &text.into()).map(|_| ()).map_err(|e| format!("{e:?}"))
+        post.call1(port, &text.into())
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
     }
 
     fn poll(&mut self) -> Poll {
         let mut inbox = self.inbox.borrow_mut();
-        let p = Poll { msgs: inbox.msgs.drain(..).collect(), lost: inbox.lost };
+        let p = Poll {
+            msgs: inbox.msgs.drain(..).collect(),
+            lost: inbox.lost,
+        };
         if inbox.lost {
             inbox.lost = false;
             drop(inbox);
@@ -144,11 +149,17 @@ impl Transport for PortTransport {
     /// Chrome's own favicon cache (needs the "favicon" permission): works for saved tabs too, and needs no network access
     fn favicon_uri(&self, n: &treetabs_core::Node) -> Option<String> {
         if self.origin.starts_with("moz-extension:") {
-            /// Firefox has no favicon cache for add-ons: the icon the tab reported (http needs the optional "all websites" permission
+            // Firefox has no favicon cache for add-ons: the icon the tab reported (http needs the optional "all websites" permission
             let f = n.favicon.as_deref()?;
-            return (f.starts_with("data:image/") || f.starts_with("https://") || f.starts_with("http://")).then(|| f.to_owned());
+            return (f.starts_with("data:image/")
+                || f.starts_with("https://")
+                || f.starts_with("http://"))
+            .then(|| f.to_owned());
         }
-        let url = n.url.as_deref().filter(|u| u.starts_with("http://") || u.starts_with("https://"))?;
+        let url = n
+            .url
+            .as_deref()
+            .filter(|u| u.starts_with("http://") || u.starts_with("https://"))?;
         let page = js_sys::encode_uri_component(url);
         Some(format!("{}/_favicon/?pageUrl={page}&size=32", self.origin))
     }
@@ -156,8 +167,14 @@ impl Transport for PortTransport {
 
 const SETTINGS_KEY: &str = "treetabs.ui";
 
+/// A file the user picked for import, once read: its name and contents.
+type PickedFile = Rc<RefCell<Option<(String, Vec<u8>)>>>;
+
 fn download(name: &str, mime: &str, data: &[u8]) -> Result<(), JsValue> {
-    let document = web_sys::window().ok_or("no window")?.document().ok_or("no document")?;
+    let document = web_sys::window()
+        .ok_or("no window")?
+        .document()
+        .ok_or("no document")?;
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(data));
     let opts = web_sys::BlobPropertyBag::new();
     opts.set_type(mime);
@@ -167,33 +184,42 @@ fn download(name: &str, mime: &str, data: &[u8]) -> Result<(), JsValue> {
     a.set_href(&url);
     a.set_download(name);
     a.click();
-    /// Give the download a moment before the URL goes
+    // Give the download a moment before the URL goes
     let revoke = Closure::once_into_js(move || {
         let _ = web_sys::Url::revoke_object_url(&url);
     });
-    web_sys::window().ok_or("no window")?.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000)?;
+    web_sys::window()
+        .ok_or("no window")?
+        .set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000)?;
     Ok(())
 }
 
-fn pick_file(slot: Rc<RefCell<Option<(String, Vec<u8>)>>>, ctx: egui::Context) -> Result<(), JsValue> {
-    let document = web_sys::window().ok_or("no window")?.document().ok_or("no document")?;
+fn pick_file(slot: PickedFile, ctx: egui::Context) -> Result<(), JsValue> {
+    let document = web_sys::window()
+        .ok_or("no window")?
+        .document()
+        .ok_or("no document")?;
     let input: web_sys::HtmlInputElement = document.create_element("input")?.dyn_into()?;
     input.set_type("file");
     input.set_accept(".json,application/json");
     let picked = input.clone();
     let on_change = Closure::once_into_js(move || {
-        let Some(file) = picked.files().and_then(|f| f.get(0)) else { return };
+        let Some(file) = picked.files().and_then(|f| f.get(0)) else {
+            return;
+        };
         let name = file.name();
         wasm_bindgen_futures::spawn_local(async move {
             match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
-                Ok(buf) => *slot.borrow_mut() = Some((name, js_sys::Uint8Array::new(&buf).to_vec())),
+                Ok(buf) => {
+                    *slot.borrow_mut() = Some((name, js_sys::Uint8Array::new(&buf).to_vec()))
+                }
                 Err(e) => web_sys::console::error_2(&"[treetabs] cannot read the file".into(), &e),
             }
             ctx.request_repaint();
         });
     });
     input.set_onchange(Some(on_change.unchecked_ref()));
-    /// Allowed: this runs right after the user's click (transient activation)
+    // Allowed: this runs right after the user's click (transient activation)
     input.click();
     Ok(())
 }
@@ -219,15 +245,21 @@ impl egui::load::BytesLoader for ExtensionLoader {
 
     fn load(&self, ctx: &egui::Context, uri: &str) -> egui::load::BytesLoadResult {
         use egui::load::{BytesPoll, LoadError};
-        /// Our own pages, and data: icons (fetch reads those too).
-        if !(uri.starts_with("data:image/") || (!self.prefix.is_empty() && uri.starts_with(&self.prefix))) {
+        // Our own pages, and data: icons (fetch reads those too).
+        if !(uri.starts_with("data:image/")
+            || (!self.prefix.is_empty() && uri.starts_with(&self.prefix)))
+        {
             return Err(LoadError::NotSupported);
         }
         let mut cache = self.cache.lock().expect("single thread");
         match cache.get(uri) {
             Some(Fetch::Ready(b)) => {
                 // No mime: the image loader looks at the bytes (png, ico, …).
-                return Ok(BytesPoll::Ready { size: None, bytes: egui::load::Bytes::Shared(b.clone()), mime: None });
+                return Ok(BytesPoll::Ready {
+                    size: None,
+                    bytes: egui::load::Bytes::Shared(b.clone()),
+                    mime: None,
+                });
             }
             Some(Fetch::Failed(e)) => return Err(LoadError::Loading(e.clone())),
             Some(Fetch::Pending) => return Ok(BytesPoll::Pending { size: None }),
@@ -257,17 +289,26 @@ impl egui::load::BytesLoader for ExtensionLoader {
 
     fn byte_size(&self) -> usize {
         let cache = self.cache.lock().expect("single thread");
-        cache.values().map(|f| if let Fetch::Ready(b) = f { b.len() } else { 0 }).sum()
+        cache
+            .values()
+            .map(|f| if let Fetch::Ready(b) = f { b.len() } else { 0 })
+            .sum()
     }
 
     fn has_pending(&self) -> bool {
-        self.cache.lock().expect("single thread").values().any(|f| matches!(f, Fetch::Pending))
+        self.cache
+            .lock()
+            .expect("single thread")
+            .values()
+            .any(|f| matches!(f, Fetch::Pending))
     }
 }
 
 async fn fetch_bytes(uri: &str) -> Result<Vec<u8>, JsValue> {
     let window = web_sys::window().ok_or("no window")?;
-    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(uri)).await?.dyn_into()?;
+    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(uri))
+        .await?
+        .dyn_into()?;
     if !resp.ok() {
         return Err(format!("HTTP {}", resp.status()).into());
     }
@@ -281,11 +322,17 @@ fn local_storage() -> Option<web_sys::Storage> {
 
 #[wasm_bindgen(start)]
 pub fn start() {
-    /// Rust log messages go to the page console.
+    // Rust log messages go to the page console.
     let _ = eframe::WebLogger::init(log::LevelFilter::Info);
-    let document = web_sys::window().expect("window").document().expect("document");
-    let canvas: web_sys::HtmlCanvasElement =
-        document.get_element_by_id("tree").expect("#tree canvas").dyn_into().expect("canvas");
+    let document = web_sys::window()
+        .expect("window")
+        .document()
+        .expect("document");
+    let canvas: web_sys::HtmlCanvasElement = document
+        .get_element_by_id("tree")
+        .expect("#tree canvas")
+        .dyn_into()
+        .expect("canvas");
     wasm_bindgen_futures::spawn_local(async move {
         let runner = eframe::WebRunner::new();
         let r = runner
@@ -294,12 +341,26 @@ pub fn start() {
                 eframe::WebOptions::default(),
                 Box::new(|cc| {
                     egui_extras::install_image_loaders(&cc.egui_ctx);
-                    let origin = web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default();
-                    let loader = ExtensionLoader { prefix: format!("{origin}/"), ..Default::default() };
+                    let origin = web_sys::window()
+                        .and_then(|w| w.location().origin().ok())
+                        .unwrap_or_default();
+                    let loader = ExtensionLoader {
+                        prefix: format!("{origin}/"),
+                        ..Default::default()
+                    };
                     cc.egui_ctx.add_bytes_loader(std::sync::Arc::new(loader));
-                    let mut t = PortTransport { port: None, inbox: Default::default(), ctx: cc.egui_ctx.clone(), origin, picked: Default::default() };
+                    let mut t = PortTransport {
+                        port: None,
+                        inbox: Default::default(),
+                        ctx: cc.egui_ctx.clone(),
+                        origin,
+                        picked: Default::default(),
+                    };
                     if let Err(e) = t.open() {
-                        web_sys::console::error_2(&"[treetabs] cannot reach the extension".into(), &e);
+                        web_sys::console::error_2(
+                            &"[treetabs] cannot reach the extension".into(),
+                            &e,
+                        );
                     }
                     Ok(Box::new(treetabs_ui::App::new(Box::new(t), None)))
                 }),

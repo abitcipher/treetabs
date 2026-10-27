@@ -10,11 +10,16 @@ fn tmpdir(name: &str) -> std::path::PathBuf {
 }
 
 fn recv(rx: &std::sync::mpsc::Receiver<ServerMsg>) -> ServerMsg {
-    rx.recv_timeout(Duration::from_secs(5)).expect("server message")
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("server message")
 }
 
 /// Viewer replica: apply everything the server sends until `until` holds.
-fn follow(rx: &std::sync::mpsc::Receiver<ServerMsg>, tree: &mut Tree, until: impl Fn(&Tree) -> bool) {
+fn follow(
+    rx: &std::sync::mpsc::Receiver<ServerMsg>,
+    tree: &mut Tree,
+    until: impl Fn(&Tree) -> bool,
+) {
     while !until(tree) {
         match recv(rx) {
             ServerMsg::Snapshot { tree: t, .. } => *tree = *t,
@@ -59,13 +64,22 @@ fn browser_events_reach_viewer_and_survive_restart() {
         follow(&viewer.rx, &mut replica, |t| t.count() == 4);
         let win = &replica.root.children[0];
         assert_eq!(win.kind, NodeKind::Window);
-        assert_eq!(win.children[0].children[0].url.as_deref(), Some("https://b"));
+        assert_eq!(
+            win.children[0].children[0].url.as_deref(),
+            Some("https://b")
+        );
 
         // Viewer edit: rename the window, get the inverse back.
         let mut f = win.fields();
         f.custom_title = Some("Work".into());
         viewer
-            .send(&ClientMsg::Edit { req: 7, ops: vec![treetabs_core::Op::Update { id: win.id, fields: Box::new(f) }] })
+            .send(&ClientMsg::Edit {
+                req: 7,
+                ops: vec![treetabs_core::Op::Update {
+                    id: win.id,
+                    fields: Box::new(f),
+                }],
+            })
             .unwrap();
         loop {
             match recv(&viewer.rx) {
@@ -83,13 +97,26 @@ fn browser_events_reach_viewer_and_survive_restart() {
         }
         // The browser closes the window.
         for (name, args) in [
-            ("tabs.onRemoved", vec![json!(11), json!({"windowId": 1, "isWindowClosing": true})]),
-            ("tabs.onRemoved", vec![json!(10), json!({"windowId": 1, "isWindowClosing": true})]),
+            (
+                "tabs.onRemoved",
+                vec![json!(11), json!({"windowId": 1, "isWindowClosing": true})],
+            ),
+            (
+                "tabs.onRemoved",
+                vec![json!(10), json!({"windowId": 1, "isWindowClosing": true})],
+            ),
             ("windows.onRemoved", vec![json!(1)]),
         ] {
-            browser.send(&ClientMsg::BrowserEvent { name: name.into(), args }).unwrap();
+            browser
+                .send(&ClientMsg::BrowserEvent {
+                    name: name.into(),
+                    args,
+                })
+                .unwrap();
         }
-        follow(&viewer.rx, &mut replica, |t| t.root.children[0].kind == NodeKind::SavedWindow);
+        follow(&viewer.rx, &mut replica, |t| {
+            t.root.children[0].kind == NodeKind::SavedWindow
+        });
         drop(viewer);
         drop(browser); // stops the in-process server, writes the snapshot
     }

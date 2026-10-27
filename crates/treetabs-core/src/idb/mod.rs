@@ -106,18 +106,30 @@ fn prefix(k: &[u8]) -> Option<Prefix> {
     let store = le_int(&k[p..p + store_len]);
     p += store_len;
     let index = le_int(&k[p..p + index_len]);
-    Some(Prefix { db, store, index, len: total })
+    Some(Prefix {
+        db,
+        store,
+        index,
+        len: total,
+    })
 }
 
 fn utf16be(b: &[u8]) -> String {
-    let units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
+    let units: Vec<u16> = b
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_be_bytes(*c))
+        .collect();
     String::from_utf16_lossy(&units)
 }
 
 fn string_with_len(b: &[u8], pos: &mut usize) -> Option<String> {
-    let n = varint(b, pos).ok()? as usize * 2;
-    let s = b.get(*pos..*pos + n)?;
-    *pos += n;
+    // Length and position come from the data: check every step.
+    let n = usize::try_from(varint(b, pos).ok()?).ok()?.checked_mul(2)?;
+    let end = pos.checked_add(n)?;
+    let s = b.get(*pos..end)?;
+    *pos = end;
     Some(utf16be(s))
 }
 
@@ -143,9 +155,10 @@ fn decode_key(b: &[u8], pos: &mut usize) -> Option<IdbKey> {
             IdbKey::Array(v)
         }
         6 => {
-            let n = varint(b, pos).ok()? as usize;
-            let s = b.get(*pos..*pos + n)?.to_vec();
-            *pos += n;
+            let n = usize::try_from(varint(b, pos).ok()?).ok()?;
+            let end = pos.checked_add(n)?;
+            let s = b.get(*pos..end)?.to_vec();
+            *pos = end;
             IdbKey::Binary(s)
         }
         _ => return None,
@@ -160,6 +173,11 @@ const WRAP_SNAPPY: u8 = 0x02;
 const TRAILER_OFFSET_TAG: u8 = 0xFE;
 
 /// Turn a stored IDB value into JSON.
+///
+/// # Errors
+///
+/// When the value is truncated, compressed wrongly, kept in an external
+/// blob file, or not valid V8 serialization.
 pub fn decode_value(v: &[u8]) -> Result<Value, String> {
     let mut pos = 0;
     varint(v, &mut pos)?; // IDB value version
@@ -194,9 +212,16 @@ pub fn decode_value(v: &[u8]) -> Result<Value, String> {
 }
 
 /// Read all object store records from an IndexedDB LevelDB folder.
+///
+/// # Errors
+///
+/// When the LevelDB files cannot be read (see [`leveldb::read_dir`]).
 pub fn read(dir: &Path) -> Result<IdbContents, IdbError> {
     let snap = leveldb::read_dir(dir)?;
-    let mut out = IdbContents { warnings: snap.warnings.clone(), ..Default::default() };
+    let mut out = IdbContents {
+        warnings: snap.warnings.clone(),
+        ..Default::default()
+    };
     let mut store_names: BTreeMap<(u64, u64), String> = BTreeMap::new();
 
     for (k, v) in snap.live() {
@@ -232,7 +257,8 @@ pub fn read(dir: &Path) -> Result<IdbContents, IdbError> {
         }
         let mut pos = p.len;
         let Some(key) = decode_key(k, &mut pos) else {
-            out.warnings.push(format!("db {} store {}: undecodable key", p.db, p.store));
+            out.warnings
+                .push(format!("db {} store {}: undecodable key", p.db, p.store));
             continue;
         };
         out.records.push(IdbRecord {
@@ -245,7 +271,11 @@ pub fn read(dir: &Path) -> Result<IdbContents, IdbError> {
         });
     }
     out.records.sort_by(|a, b| {
-        (a.database_id, a.store_id, a.key.to_string()).cmp(&(b.database_id, b.store_id, b.key.to_string()))
+        (a.database_id, a.store_id, a.key.to_string()).cmp(&(
+            b.database_id,
+            b.store_id,
+            b.key.to_string(),
+        ))
     });
     Ok(out)
 }
@@ -254,6 +284,10 @@ pub fn read(dir: &Path) -> Result<IdbContents, IdbError> {
 pub const SNAPSHOT_KEY: &str = "currentSessionSnapshot";
 
 /// Find the Tabs Outliner session array (`data` of `currentSessionSnapshot`).
+///
+/// # Errors
+///
+/// When there is no session snapshot record, or it cannot be decoded.
 pub fn session_snapshot(contents: &IdbContents) -> Result<&Value, IdbError> {
     let rec = contents
         .records
@@ -263,7 +297,11 @@ pub fn session_snapshot(contents: &IdbContents) -> Result<&Value, IdbError> {
             let stores: Vec<String> = contents
                 .records
                 .iter()
-                .map(|r| r.store_name.clone().unwrap_or_else(|| r.store_id.to_string()))
+                .map(|r| {
+                    r.store_name
+                        .clone()
+                        .unwrap_or_else(|| r.store_id.to_string())
+                })
                 .collect();
             IdbError::NoSnapshot(stores.join(", "))
         })?;
@@ -287,6 +325,10 @@ pub struct SnapshotVersion {
 /// All versions of `currentSessionSnapshot` still present in the folder,
 /// newest first. LevelDB drops old versions on compaction, so how far back
 /// this goes depends on when the browser last compacted the database.
+///
+/// # Errors
+///
+/// When the LevelDB files cannot be read.
 pub fn snapshot_history(dir: &Path) -> Result<Vec<SnapshotVersion>, IdbError> {
     let snap = leveldb::read_dir_with(dir, true)?;
     let is_snapshot_key = |k: &[u8]| {
