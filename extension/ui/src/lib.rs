@@ -115,6 +115,10 @@ impl Transport for PortTransport {
         self.port.is_some()
     }
 
+    fn companion_switch(&self) -> bool {
+        true
+    }
+
     fn describe(&self) -> String {
         treetabs_ui::i18n::tr("via the extension").into()
     }

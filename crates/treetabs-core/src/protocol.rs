@@ -15,6 +15,17 @@ pub enum Role {
     Viewer,
 }
 
+/// Where a store keeps the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreKind {
+    /// A folder on disk (the companion app or the GUI); it can be moved.
+    #[default]
+    Folder,
+    /// The browser's extension storage (the extension on its own).
+    Browser,
+}
+
 /// Client to server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -39,6 +50,22 @@ pub enum ClientMsg {
     BrowserEvent {
         name: String,
         args: Vec<Value>,
+    },
+    /// The tree the extension kept while it ran without the companion
+    /// app, handed over on its first connection (before its snapshot).
+    /// A new store takes it as its tree; otherwise it is saved as a
+    /// backup. Answered with [`ServerMsg::Adopted`].
+    AdoptTree {
+        tree: Box<Tree>,
+        /// The extension's bookmark map (`bookmarks.json`), so the
+        /// bookmark folder it mirrored stays bound to the same nodes.
+        #[serde(default)]
+        bookmarks: Option<String>,
+        /// The store's journal position when the tree left it (see
+        /// [`ServerMsg::Detached`]). If the store has not changed since,
+        /// the tree replaces it, as if it had never left.
+        #[serde(default)]
+        since: Option<u64>,
     },
     /// Answer to [`ServerMsg::Call`].
     CallResult {
@@ -79,6 +106,13 @@ pub enum ClientMsg {
     /// Remove trash items older than this many days (0 = keep them).
     SetTrashDays {
         days: u32,
+    },
+    /// Turn the companion app on or off for this browser (Settings >
+    /// Storage in the tree window). The extension carries it out; the
+    /// store only answers "off" with [`ServerMsg::Detached`], so the tree
+    /// goes along into the browser.
+    UseCompanionApp {
+        on: bool,
     },
     /// Copy the store to another folder and use it from now on; answered
     /// with [`ServerMsg::StoreMoved`] to every client (then the server
@@ -135,6 +169,23 @@ pub enum ServerMsg {
         trash_days: u32,
         #[serde(default)]
         dir: String,
+        #[serde(default)]
+        kind: StoreKind,
+    },
+    /// Reply to [`ClientMsg::UseCompanionApp`] `{on: false}`: the tree and
+    /// the bookmark map, for the extension to keep from now on, and the
+    /// journal position they were taken at.
+    Detached {
+        seq: u64,
+        tree: Box<Tree>,
+        #[serde(default)]
+        bookmarks: Option<String>,
+    },
+    /// Reply to [`ClientMsg::AdoptTree`]: the tree is safe in the store,
+    /// as its tree (`backup: None`) or as the backup named here.
+    Adopted {
+        #[serde(default)]
+        backup: Option<String>,
     },
     /// The store was copied to `dir` and the server stopped: connect again
     /// (a native host exits, and the browser starts it again).

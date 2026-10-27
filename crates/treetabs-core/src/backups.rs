@@ -97,6 +97,23 @@ pub fn export_now(store: &Path, tree: &Tree, keep: usize, now_ms: i64) -> io::Re
     Ok(path)
 }
 
+/// Save `tree` among the snapshots (`backups/<name>`), where [`list`] and
+/// [`read`] find it. Pruning leaves it alone.
+///
+/// # Errors
+///
+/// When the name is not a plain `.json` file name, or the file cannot be written.
+pub fn save_copy(store: &Path, tree: &Tree, name: &str) -> io::Result<PathBuf> {
+    if name.contains(['/', '\\']) || name.starts_with('.') || !name.ends_with(".json") {
+        return Err(io::Error::other(format!("bad backup name: {name}")));
+    }
+    let dir = dir_of(store, BackupKind::Snapshot);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(name);
+    crate::save_portable(tree, &path, crate::JsonStyle::Compact)?;
+    Ok(path)
+}
+
 fn prune(store: &Path, keep: usize) -> io::Result<()> {
     let mut names: Vec<String> = list(store)
         .into_iter()

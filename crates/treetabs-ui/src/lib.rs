@@ -62,6 +62,11 @@ pub trait Transport {
     fn take_file(&mut self) -> Option<(String, Vec<u8>)> {
         None
     }
+    /// The tree window of the extension, which can turn the companion
+    /// app on and off (Settings > Storage).
+    fn companion_switch(&self) -> bool {
+        false
+    }
     /// The store moved to `dir` (connect there from now on).
     fn store_moved(&mut self, _dir: &str) {}
     /// Saved UI settings (JSON), kept per device.

@@ -1,7 +1,7 @@
 [package]
 name = "treetabs-extension-ui"
 description = "The tree window of the extension: treetabs-ui compiled to wasm"
-version = "0.3.0"
+version = "0.4.3"
 edition = "2024"
 license = "MIT"
 

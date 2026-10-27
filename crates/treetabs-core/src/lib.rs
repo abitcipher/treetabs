@@ -3,6 +3,7 @@
 pub mod backups;
 pub mod export;
 pub mod idb;
+pub mod memstore;
 pub mod model;
 pub mod ops;
 pub mod protocol;
@@ -13,7 +14,7 @@ pub mod tabs_outliner;
 
 pub use model::{EditError, Node, NodeId, NodeKind, Position, TrashItem, Tree};
 pub use ops::{NodeFields, Op};
-pub use store::Store;
+pub use store::{Store, TreeStore};
 
 use std::path::Path;
 

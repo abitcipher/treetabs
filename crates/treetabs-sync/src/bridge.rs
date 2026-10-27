@@ -6,9 +6,10 @@ use crate::bookmarks::Mirror;
 use crate::protocol::ServerMsg;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use treetabs_core::sync::{BrowserEvent, BrowserTab};
 use treetabs_core::{Node, NodeId, NodeKind, Op, Tree};
+use web_time::Instant;
 
 /// How long an open request waits for its browser events.
 const EXPECT_FOR: Duration = Duration::from_secs(20);
@@ -24,6 +25,8 @@ struct Expect {
     /// Browser window it will appear in, if known.
     window: Option<i64>,
     url: Option<String>,
+    /// The browser's tab id, once the call that opens it has answered.
+    tab_id: Option<i64>,
     is_window: bool,
     since: Instant,
 }
@@ -35,6 +38,7 @@ impl Expect {
             node,
             window,
             url: Some(url),
+            tab_id: None,
             is_window: false,
             since,
         }
@@ -46,6 +50,7 @@ impl Expect {
             node,
             window: None,
             url: None,
+            tab_id: None,
             is_window: true,
             since,
         }
@@ -68,6 +73,9 @@ pub struct Browser {
 
 enum Pending {
     Plain(String),
+    /// `tabs.create` or `windows.create` for saved nodes: the tabs it
+    /// opens, in order.
+    Opened(Vec<NodeId>),
     Bookmark(crate::bookmarks::PendingCall),
 }
 
@@ -163,6 +171,12 @@ impl Browser {
     ) -> (Vec<Op>, Calls) {
         let mut out = Vec::new();
         match self.pending.remove(&req) {
+            Some(Pending::Opened(nodes)) => {
+                if let Some(e) = err {
+                    log::warn!("opening saved tabs failed: {e}");
+                }
+                (self.opened(&nodes, ok.as_ref(), tree), out)
+            }
             Some(Pending::Plain(api)) => {
                 if let Some(e) = err {
                     log::warn!("{api} failed: {e}");
@@ -226,6 +240,14 @@ impl Browser {
                 Some(ops)
             }
             BrowserEvent::TabCreated(t) | BrowserEvent::TabUpdated(t) => {
+                if let Some(i) = self
+                    .expects
+                    .iter()
+                    .position(|e| !e.is_window && e.tab_id == Some(t.id))
+                {
+                    let e = self.expects.remove(i);
+                    return Some(vec![bind_tab(tree.root.find(e.node)?, t.id, t.window_id)]);
+                }
                 let url = tab_url(t);
                 let i = self.expects.iter().position(|e| {
                     !e.is_window
@@ -238,16 +260,7 @@ impl Browser {
                     return None;
                 }
                 let e = self.expects.remove(i);
-                let node = tree.root.find(e.node)?;
-                let mut f = node.fields();
-                f.kind = NodeKind::Tab;
-                f.data.insert("id".into(), json!(t.id));
-                f.data.insert("windowId".into(), json!(t.window_id));
-                f.data.remove("crashDetectedDate");
-                Some(vec![Op::Update {
-                    id: e.node,
-                    fields: Box::new(f),
-                }])
+                Some(vec![bind_tab(tree.root.find(e.node)?, t.id, t.window_id)])
             }
             BrowserEvent::TabRemoved { tab_id, .. } if self.closing.remove(tab_id) => {
                 let nid = find_open_tab(tree, *tab_id)?;
@@ -263,6 +276,53 @@ impl Browser {
             }
             _ => None,
         }
+    }
+
+    /// The browser answered a call that opened saved `nodes`: a tab, or a
+    /// window with its tabs in the same order. Each node is bound to its
+    /// tab by id. Firefox reports a new tab as about:blank before its
+    /// address, so the address may not have found the node: if the tab
+    /// already got a node of its own, the saved node takes its place.
+    fn opened(&mut self, nodes: &[NodeId], ok: Option<&Value>, tree: &Tree) -> Vec<Op> {
+        let Some(ok) = ok else { return vec![] };
+        let tabs: Vec<&Value> = match ok.get("tabs").and_then(Value::as_array) {
+            Some(tabs) => tabs.iter().collect(),
+            None => vec![ok],
+        };
+        let mut ops = Vec::new();
+        for (&nid, tab) in nodes.iter().zip(tabs) {
+            let (Some(tab_id), Some(window)) = (
+                tab.get("id").and_then(Value::as_i64),
+                tab.get("windowId").and_then(Value::as_i64),
+            ) else {
+                continue;
+            };
+            let Some(node) = tree.root.find(nid) else {
+                continue;
+            };
+            match find_open_tab(tree, tab_id) {
+                // Bound already (by its address).
+                Some(n) if n == nid => self.expects.retain(|e| e.node != nid),
+                // The tab got a node of its own: drop that one.
+                Some(other) => {
+                    self.expects.retain(|e| e.node != nid);
+                    ops.push(bind_tab(node, tab_id, window));
+                    if tree.root.find(other).is_some_and(|o| o.children.is_empty()) {
+                        ops.push(Op::Delete { id: other });
+                    }
+                }
+                // Not reported yet: bind it by id when it is.
+                None => {
+                    for e in &mut self.expects {
+                        if e.node == nid && !e.is_window {
+                            e.tab_id = Some(tab_id);
+                            e.window = Some(window);
+                        }
+                    }
+                }
+            }
+        }
+        ops
     }
 
     /// Open or focus `id` in the browser.
@@ -318,9 +378,10 @@ impl Browser {
         if let Some(win) = open_window_of(tree, id) {
             self.expects
                 .push(Expect::tab(id, Some(win), url.clone(), since));
-            self.call(
+            self.call_with(
                 "tabs.create",
                 vec![json!({"windowId": win, "url": url, "active": true})],
+                Pending::Opened(vec![id]),
                 out,
             );
             self.focus_window(win, out);
@@ -330,9 +391,10 @@ impl Browser {
             self.expects.push(Expect::window(w, since));
         }
         self.expects.push(Expect::tab(id, None, url.clone(), since));
-        self.call(
+        self.call_with(
             "windows.create",
             vec![json!({"url": [url], "focused": true})],
+            Pending::Opened(vec![id]),
             out,
         );
     }
@@ -373,7 +435,8 @@ impl Browser {
                 create["height"] = json!(height);
             }
         }
-        self.call("windows.create", vec![create], out);
+        let nodes = urls.iter().map(|(nid, _)| *nid).collect();
+        self.call_with("windows.create", vec![create], Pending::Opened(nodes), out);
     }
 
     /// Close open tabs/windows, keeping their nodes as saved.
@@ -500,6 +563,19 @@ impl Browser {
             vec![json!(tabs), json!({"windowId": wid, "index": index})],
             out,
         );
+    }
+}
+
+/// `node`, a saved tab being opened, is now the browser's tab `tab_id`.
+fn bind_tab(node: &Node, tab_id: i64, window: i64) -> Op {
+    let mut f = node.fields();
+    f.kind = NodeKind::Tab;
+    f.data.insert("id".into(), json!(tab_id));
+    f.data.insert("windowId".into(), json!(window));
+    f.data.remove("crashDetectedDate");
+    Op::Update {
+        id: node.id,
+        fields: Box::new(f),
     }
 }
 

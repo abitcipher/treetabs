@@ -7,7 +7,7 @@ exclude = ["extension"]
 edition = "2024"
 # `if let` chains (1.88) and `File::try_lock` (1.89) are used.
 rust-version = "1.89"
-version = "0.3.0"
+version = "0.4.3"
 license = "MIT"
 
 # Shared by every crate (`[lints] workspace = true`).

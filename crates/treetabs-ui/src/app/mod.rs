@@ -25,7 +25,7 @@ use egui_ltreeview::TreeViewState;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use treetabs_core::protocol::{ClientMsg, ServerMsg};
+use treetabs_core::protocol::{ClientMsg, ServerMsg, StoreKind};
 use treetabs_core::{Node, NodeId, Op, Tree};
 
 const UNDO_LIMIT: usize = 200;
@@ -99,6 +99,8 @@ enum Command {
     EmptyTrash,
     /// Copy the store to this folder and use it from now on (asks first).
     MoveStore(String),
+    /// Turn the companion app on or off for this browser (asks first).
+    UseCompanionApp(bool),
 }
 
 /// The details panel's text fields, kept while the user types; committed
@@ -186,6 +188,7 @@ pub struct App {
     export_format: treetabs_core::export::Format,
     /// Where the server keeps the tree, and the folder typed to move it to.
     store_dir: String,
+    store_kind: StoreKind,
     move_to: String,
     /// Tab shown in the settings window.
     settings_tab: SettingsTab,
@@ -232,6 +235,7 @@ impl App {
             pending_import: import,
             export_format: treetabs_core::export::Format::Treetabs,
             store_dir: String::new(),
+            store_kind: StoreKind::Folder,
             move_to: String::new(),
             settings_tab: SettingsTab::Interface,
             tree_ids: [egui::Id::NULL; 2],
@@ -348,8 +352,13 @@ impl App {
                     EditKind::Quiet => {}
                 }
             }
-            ServerMsg::StoreOptions { trash_days, dir } => {
+            ServerMsg::StoreOptions {
+                trash_days,
+                dir,
+                kind,
+            } => {
                 self.trash_days = trash_days;
+                self.store_kind = kind;
                 if self.move_to.is_empty() || self.move_to == self.store_dir {
                     self.move_to = dir.clone();
                 }
@@ -385,7 +394,10 @@ impl App {
                     self.status = message;
                 }
             }
-            ServerMsg::Call { .. } | ServerMsg::Resync => {}
+            ServerMsg::Call { .. }
+            | ServerMsg::Resync
+            | ServerMsg::Adopted { .. }
+            | ServerMsg::Detached { .. } => {}
         }
     }
 

@@ -126,6 +126,10 @@ type another folder and press **Move…**. Everything is copied there, the compa
 
 ![Settings: Storage](images/settings-storage.png)
 
+Without the companion app, Storage says *In this browser's own storage*.
+The **Companion app** button below turns the app on or off; see
+[USER-GUIDE.md](USER-GUIDE.md).
+
 **About**: what treetabs is, its version, and where the tree is.
 
 ![Settings: About](images/settings-about.png)

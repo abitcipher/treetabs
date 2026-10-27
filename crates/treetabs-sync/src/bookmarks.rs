@@ -17,10 +17,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use treetabs_core::{Node, NodeId, NodeKind, Op, Tree};
+use web_time::Instant;
 
 const ROOT_TITLE: &str = "treetabs";
+/// New name of a folder left behind (see [`Mirror::leave_folder`]).
+const LEFT_TITLE: &str = "treetabs (kept in the browser)";
 
 /// Which bookmark item a node owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,7 +105,8 @@ enum Phase {
 #[derive(Default)]
 pub struct Mirror {
     pub enabled: bool,
-    path: Option<PathBuf>,
+    /// The map, saved but not yet written (see [`Mirror::take_saved`]).
+    to_save: Option<Vec<u8>>,
     phase: Phase,
     root: Option<String>,
     other: Option<String>,
@@ -119,8 +122,11 @@ pub struct Mirror {
     map_changed: bool,
     importing: bool,
     /// A full diff walks the whole tree (~0.1 s for 50k nodes): rate-limit it.
-    last_diff: Option<std::time::Instant>,
+    last_diff: Option<Instant>,
     followup: bool,
+    /// On the next load, an existing folder this map does not know is
+    /// renamed and a new one is made (see [`Mirror::leave_folder`]).
+    leave_folder: bool,
     /// Override of `MIN_DIFF_INTERVAL` (tests use zero).
     pub min_diff_interval: Option<std::time::Duration>,
 }
@@ -140,21 +146,24 @@ fn index_of(info: &Value) -> Option<usize> {
 }
 
 impl Mirror {
-    pub fn configure(&mut self, enabled: bool, path: PathBuf) {
+    /// Turn the mirror on or off, and start from the map it saved last
+    /// time (`bookmarks.json`, see [`Mirror::take_saved`]).
+    pub fn configure(&mut self, enabled: bool, saved: Option<&[u8]>) {
         self.enabled = enabled;
-        self.path = Some(path);
-        if let Some(saved) = self
-            .path
-            .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|b| serde_json::from_slice::<Saved>(&b).ok())
-        {
+        if let Some(saved) = saved.and_then(|b| serde_json::from_slice::<Saved>(b).ok()) {
             self.root = saved.root;
             for (k, id) in saved.map {
                 self.rev.insert(id.clone(), k);
                 self.map.insert(k, id);
             }
         }
+    }
+
+    /// The folder in this browser mirrors another tree (the one the
+    /// extension kept without the companion app, now a backup): leave it
+    /// as it is under another name, instead of importing it.
+    pub fn leave_folder(&mut self) {
+        self.leave_folder = true;
     }
 
     fn call(&mut self, api: &str, args: Vec<Value>, pending: PendingCall) -> BookmarkCall {
@@ -208,7 +217,7 @@ impl Mirror {
             return vec![];
         }
         self.dirty = false;
-        self.last_diff = Some(std::time::Instant::now());
+        self.last_diff = Some(Instant::now());
         let calls = self.diff(tree);
         // More rounds are needed while folders are still being created.
         self.followup = !calls.is_empty();
@@ -216,15 +225,19 @@ impl Mirror {
     }
 
     fn save(&mut self) {
-        let Some(p) = &self.path else { return };
         let saved = Saved {
             root: self.root.clone(),
             map: self.map.iter().map(|(k, v)| (*k, v.clone())).collect(),
         };
         if let Ok(b) = serde_json::to_vec(&saved) {
-            let _ = treetabs_core::store::write_atomic(p, &b);
+            self.to_save = Some(b);
         }
         self.map_changed = false;
+    }
+
+    /// The map to keep for next time (`bookmarks.json`), when it changed.
+    pub fn take_saved(&mut self) -> Option<Vec<u8>> {
+        self.to_save.take()
     }
 
     fn bind(&mut self, key: Key, id: String) {
@@ -413,6 +426,23 @@ impl Mirror {
                 })
             });
         self.items.clear();
+        let mut calls = Vec::new();
+        let found = match found {
+            Some(folder)
+                if std::mem::take(&mut self.leave_folder)
+                    && folder.get("id").and_then(Value::as_str) != self.root.as_deref() =>
+            {
+                let id = folder["id"].as_str().unwrap_or_default().to_owned();
+                log::info!("bookmark folder {id} mirrors another tree: renamed, a new one is made");
+                calls.push(self.call(
+                    "bookmarks.update",
+                    vec![json!(id), json!({"title": LEFT_TITLE})],
+                    PendingCall::Other,
+                ));
+                None
+            }
+            f => f,
+        };
         match found {
             None => {
                 // Fresh start: nothing is mapped any more.
@@ -425,7 +455,8 @@ impl Mirror {
                     vec![json!({"parentId": other, "title": ROOT_TITLE})],
                     PendingCall::CreateRoot,
                 );
-                (vec![], vec![call])
+                calls.push(call);
+                (vec![], calls)
             }
             Some(folder) => {
                 let root = folder["id"].as_str().unwrap_or_default().to_owned();

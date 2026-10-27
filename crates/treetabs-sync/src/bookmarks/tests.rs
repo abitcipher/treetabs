@@ -431,14 +431,40 @@ fn big_tree_initial_sync() {
     let mut t = treetabs_core::load_json_str(&text).unwrap().tree;
     let mut chrome = FakeChrome::new();
     let mut m = mirror();
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let calls = m.start(&t);
     settle(&mut m, &mut chrome, &mut t, calls, false);
     let n = chrome.items.len();
     println!("synced {n} bookmarks in {:?}", start.elapsed());
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     m.dirty = true;
     assert!(m.tick(&t).is_empty());
     println!("no-op diff in {:?}", start.elapsed());
     assert!(n > 45_000);
+}
+
+#[test]
+fn a_folder_of_another_tree_is_left_alone() {
+    // The extension mirrored its own tree here, then handed it to an app
+    // whose store already had a tree (so it became a backup).
+    let mut kept = sample();
+    let mut chrome = FakeChrome::new();
+    let mut m = mirror();
+    let calls = m.start(&kept);
+    settle(&mut m, &mut chrome, &mut kept, calls, false);
+
+    let mut t = Tree::default();
+    t.root.children.push(saved_tab("Z", "https://z/"));
+    let mut m = mirror();
+    m.leave_folder();
+    let calls = m.start(&t);
+    settle(&mut m, &mut chrome, &mut t, calls, false);
+    assert_eq!(chrome.outline(), "Z <https://z/>\n");
+    assert_eq!(t.count(), 2, "nothing imported from the old folder");
+    let left = chrome.items["2"]
+        .children
+        .iter()
+        .filter(|c| chrome.items[*c].title == LEFT_TITLE)
+        .count();
+    assert_eq!(left, 1);
 }

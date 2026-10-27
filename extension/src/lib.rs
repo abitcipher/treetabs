@@ -1,26 +1,39 @@
 //! treetabs browser extension.
 //!
-//! Deliberately thin: it forwards tab, window and bookmark events to the
-//! native host, answers "resync" with a full window snapshot, and executes
-//! `chrome.*` calls the host asks for. All tree logic lives in the host.
+//! With the companion app it is thin: it forwards tab, window and bookmark
+//! events to the native host, answers "resync" with a full window
+//! snapshot, and executes `chrome.*` calls the host asks for. All tree
+//! logic lives in the host.
+//!
+//! Without the app it runs the same tree logic itself and keeps the tree
+//! in the browser's extension storage (see [`alone`]). Which one, is
+//! decided each time the background script starts (see [`Mode`]).
+
+mod alone;
+mod storage;
 
 use js_sys::{Array, Function, Object, Promise, Reflect};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use treetabs_core::protocol::ServerMsg;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 #[oxichrome::extension(
     name = "treetabs",
-    version = "0.3.0",
+    version = "0.4.3",
     description = "Tree of windows and tabs, kept in sync with bookmarks",
-    permissions = ["tabs", "bookmarks", "nativeMessaging", "storage", "favicon"]
+    permissions = ["tabs", "bookmarks", "nativeMessaging", "storage", "unlimitedStorage", "favicon"]
 )]
 struct Extension;
 
 /// Native host name (see `treetabs install-host`).
 const HOST: &str = "dev.treetabs.host";
+
+/// Set once the companion app has answered: from then on the extension
+/// waits for the app instead of starting a tree of its own.
+const HOST_SEEN: &str = "hostSeen";
 
 /// Events forwarded to the host.
 const EVENTS: &[&str] = &[
@@ -42,7 +55,45 @@ const EVENTS: &[&str] = &[
     "bookmarks.onImportEnded",
 ];
 
+/// The user's choice in Settings > Storage: "on" or "off". Without a
+/// choice the extension uses the app when it is installed.
+const COMPANION_APP: &str = "companionApp";
+
+/// The user's choice about the companion app (see [`COMPANION_APP`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    /// Use the app when it is installed.
+    Auto,
+    /// Use the app; without it, keep the tree in the browser meanwhile.
+    On,
+    /// Never use the app.
+    Off,
+}
+
+/// Who owns the tree, decided at each start of the background script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Mode {
+    /// Waiting for the companion app's first answer.
+    Deciding,
+    /// The companion app owns the tree.
+    Host,
+    /// No app: the extension owns the tree (see [`alone`]).
+    Alone,
+    /// No app, and the tree in the browser's storage does not load.
+    Failed(String),
+}
+
 thread_local! {
+    static MODE: RefCell<Mode> = const { RefCell::new(Mode::Deciding) };
+    /// Whether the companion app ever answered (see [`HOST_SEEN`]).
+    static SEEN: Cell<bool> = const { Cell::new(false) };
+    /// The current port got a message from the host.
+    static ANSWERED: Cell<bool> = const { Cell::new(false) };
+    static CHOICE: Cell<Choice> = const { Cell::new(Choice::Auto) };
+    /// The tree is on its way from the app to the browser: browser events
+    /// are not sent to the app any more (the snapshot taken afterwards
+    /// covers them).
+    static LEAVING: Cell<bool> = const { Cell::new(false) };
     static PORT: RefCell<Option<JsValue>> = const { RefCell::new(None) };
     static RETRY_MS: RefCell<i32> = const { RefCell::new(500) };
     /// Open tree-window pages, by viewer id.
@@ -64,6 +115,14 @@ const TREE_WIDTH: i32 = 420;
 extern "C" {
     #[wasm_bindgen(js_name = setTimeout)]
     fn set_timeout(f: &Function, ms: i32) -> JsValue;
+}
+
+/// Wait `ms` milliseconds.
+async fn sleep(ms: i32) {
+    let p = Promise::new(&mut |resolve, _| {
+        set_timeout(&resolve, ms);
+    });
+    let _ = JsFuture::from(p).await;
 }
 
 /// The extension API: `browser` in Firefox (its APIs return promises), `chrome` elsewhere.
@@ -123,7 +182,185 @@ async fn start() {
     let _ = Reflect::set(&js_sys::global(), &"treetabsOpenTree".into(), open.as_ref());
     open.forget();
     listen("runtime.onConnect", viewer_connected);
+    let _ = log::set_logger(&ConsoleLog).map(|()| log::set_max_level(log::LevelFilter::Info));
+    // For tests: which mode, and the tree when the extension owns it.
+    let mode = Closure::<dyn FnMut() -> JsValue>::new(|| {
+        MODE.with(|m| format!("{:?}", m.borrow()))
+            .to_lowercase()
+            .into()
+    });
+    let _ = Reflect::set(&js_sys::global(), &"treetabsMode".into(), mode.as_ref());
+    mode.forget();
+    let tree = Closure::<dyn FnMut() -> JsValue>::new(|| {
+        alone::tree_json().map_or(JsValue::NULL, JsValue::from)
+    });
+    let _ = Reflect::set(&js_sys::global(), &"treetabsTree".into(), tree.as_ref());
+    tree.forget();
+    spawn_local(async {
+        let keys = Array::of2(&HOST_SEEN.into(), &COMPANION_APP.into());
+        let saved = call("storage.local.get", &Array::of1(&keys))
+            .await
+            .unwrap_or(JsValue::UNDEFINED);
+        let seen = Reflect::get(&saved, &HOST_SEEN.into()).is_ok_and(|v| v.is_truthy());
+        SEEN.with(|s| s.set(seen));
+        let choice = match Reflect::get(&saved, &COMPANION_APP.into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .as_deref()
+        {
+            Some("on") => Choice::On,
+            Some("off") => Choice::Off,
+            _ => Choice::Auto,
+        };
+        CHOICE.with(|c| c.set(choice));
+        if choice == Choice::Off {
+            go_alone();
+        } else {
+            connect();
+        }
+    });
+}
+
+async fn save_choice(choice: Choice) {
+    CHOICE.with(|c| c.set(choice));
+    let value = match choice {
+        Choice::On => "on",
+        Choice::Off => "off",
+        Choice::Auto => return,
+    };
+    let _ = call(
+        "storage.local.set",
+        &Array::of1(&obj(&[(COMPANION_APP, value.into())])),
+    )
+    .await;
+}
+
+/// Tell every open tree window something.
+fn status_all(message: &str) {
+    VIEWERS.with(|v| {
+        for port in v.borrow().values() {
+            post_to(port, &status_json(message));
+        }
+    });
+}
+
+/// A tree window asks to turn the companion app on or off. Returns true
+/// when it was such a request (handled here, not passed on).
+fn companion_request(vid: u32, text: &str) -> bool {
+    let Ok(treetabs_core::protocol::ClientMsg::UseCompanionApp { on }) = serde_json::from_str(text)
+    else {
+        return false;
+    };
+    match (mode(), on) {
+        (Mode::Alone, true) => spawn_local(use_app()),
+        // The app sends the tree along (see `leave_app`).
+        (Mode::Host, false) if PORT.with(|p| p.borrow().is_some()) => {
+            LEAVING.with(|l| l.set(true));
+            post(&obj(&[
+                ("type", "viewer_msg".into()),
+                ("vid", vid.into()),
+                ("msg", text.into()),
+            ]));
+        }
+        // The app is not running: nothing to take along. The bookmark
+        // folder is read back into the new tree.
+        (Mode::Host | Mode::Deciding, false) => spawn_local(async {
+            save_choice(Choice::Off).await;
+            PORT.with(|p| p.borrow_mut().take());
+            go_alone();
+            status_all("The companion app was not running: the tree is rebuilt from the bookmarks");
+        }),
+        (Mode::Failed(_), false) => {}
+        // Already as asked.
+        _ => status_all(""),
+    }
+    true
+}
+
+/// Turn the app on: stop owning the tree, and connect; the tree kept in
+/// the browser is handed over on the app's first message.
+async fn use_app() {
+    save_choice(Choice::On).await;
+    alone::stop().await;
+    set_mode(Mode::Deciding);
     connect();
+}
+
+/// The app sent the tree for the browser to keep: save it, leave the app,
+/// and own the tree from now on.
+async fn leave_app(text: &str) {
+    let Ok(ServerMsg::Detached {
+        seq,
+        tree,
+        bookmarks,
+    }) = serde_json::from_str::<ServerMsg>(text)
+    else {
+        return;
+    };
+    if let Err(e) = storage::keep_detached(*tree, bookmarks, seq).await {
+        web_sys::console::error_1(&format!("[treetabs] cannot keep the tree: {e}").into());
+        status_all(&format!("Cannot keep the tree in the browser: {e}"));
+        LEAVING.with(|l| l.set(false));
+        return;
+    }
+    save_choice(Choice::Off).await;
+    if let Some(port) = PORT.with(|p| p.borrow_mut().take())
+        && let Ok(f) = Reflect::get(&port, &"disconnect".into())
+    {
+        let _ = f.unchecked_into::<Function>().call0(&port);
+    }
+    LEAVING.with(|l| l.set(false));
+    go_alone();
+}
+
+/// `log` messages (from the hub) on the service worker console.
+struct ConsoleLog;
+
+impl log::Log for ConsoleLog {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::Level::Info
+    }
+    fn log(&self, r: &log::Record) {
+        let text: JsValue = format!("[treetabs] {}", r.args()).into();
+        match r.level() {
+            log::Level::Error => web_sys::console::error_1(&text),
+            log::Level::Warn => web_sys::console::warn_1(&text),
+            _ => web_sys::console::log_1(&text),
+        }
+    }
+    fn flush(&self) {}
+}
+
+fn mode() -> Mode {
+    MODE.with(|m| m.borrow().clone())
+}
+
+fn set_mode(m: Mode) {
+    MODE.with(|x| *x.borrow_mut() = m);
+}
+
+/// The companion app is not installed (Chrome and Firefox wording).
+fn host_missing(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("not found") || e.contains("forbidden") || e.contains("no such native application")
+}
+
+/// No companion app: own the tree from now on.
+fn go_alone() {
+    set_mode(Mode::Alone);
+    PORT.with(|p| p.borrow_mut().take());
+    spawn_local(async move {
+        if let Err(e) = alone::start().await {
+            web_sys::console::error_2(&"[treetabs] cannot load the tree".into(), &e.clone().into());
+            let msg = format!("Cannot read the tree kept in the browser: {e}");
+            VIEWERS.with(|v| {
+                for port in v.borrow().values() {
+                    post_to(port, &status_json(&msg));
+                }
+            });
+            set_mode(Mode::Failed(msg));
+        }
+    });
 }
 
 /// Add a one-argument listener to `chrome.<event>`
@@ -219,20 +456,25 @@ fn viewer_connected(port: JsValue) {
         *n.borrow_mut() += 1;
         v
     });
-    let on_msg = Closure::<dyn FnMut(JsValue)>::new(move |m: JsValue| {
-        post(&obj(&[
+    let on_msg = Closure::<dyn FnMut(JsValue)>::new(move |m: JsValue| match mode() {
+        _ if companion_request(vid, &m.as_string().unwrap_or_default()) => {}
+        Mode::Alone => alone::viewer_msg(vid, &m.as_string().unwrap_or_default()),
+        _ => post(&obj(&[
             ("type", "viewer_msg".into()),
             ("vid", vid.into()),
             ("msg", m),
-        ]));
+        ])),
     });
     let on_disconnect = Closure::<dyn FnMut(JsValue)>::new(move |_p: JsValue| {
         VIEWERS.with(|v| v.borrow_mut().remove(&vid));
         PARTS.with(|p| p.borrow_mut().remove(&vid));
-        post(&obj(&[
-            ("type", "viewer_close".into()),
-            ("vid", vid.into()),
-        ]));
+        match mode() {
+            Mode::Alone => alone::viewer_close(vid),
+            _ => post(&obj(&[
+                ("type", "viewer_close".into()),
+                ("vid", vid.into()),
+            ])),
+        }
     });
     for (ev, cb) in [
         ("onMessage", on_msg.as_ref()),
@@ -247,15 +489,80 @@ fn viewer_connected(port: JsValue) {
     on_msg.forget();
     on_disconnect.forget();
     VIEWERS.with(|v| v.borrow_mut().insert(vid, port.clone()));
-    if PORT.with(|p| p.borrow().is_some()) {
-        post(&obj(&[("type", "viewer_open".into()), ("vid", vid.into())]));
-    } else {
-        post_to(&port, &host_down_status());
+    match mode() {
+        Mode::Alone => alone::viewer_open(vid),
+        Mode::Failed(msg) => post_to(&port, &status_json(&msg)),
+        // Opened for the host once it answers (see `connect`).
+        Mode::Deciding => {}
+        Mode::Host => {
+            if PORT.with(|p| p.borrow().is_some()) {
+                post(&obj(&[("type", "viewer_open".into()), ("vid", vid.into())]));
+            } else {
+                post_to(&port, &host_down_status());
+            }
+        }
     }
 }
 
+fn status_json(message: &str) -> JsValue {
+    let m = ServerMsg::Status {
+        browsers: 0,
+        message: message.to_owned(),
+    };
+    serde_json::to_string(&m).unwrap_or_default().into()
+}
+
 fn host_down_status() -> JsValue {
-    r#"{"type":"status","browsers":0,"message":"treetabs host is not running (see the extension's service worker console)"}"#.into()
+    status_json(
+        "The treetabs companion app is not running. If you removed it on purpose, choose Settings → Storage → Stop using the companion app",
+    )
+}
+
+/// The open tree-window pages.
+fn viewer_ids() -> Vec<u32> {
+    VIEWERS.with(|v| v.borrow().keys().copied().collect())
+}
+
+/// Send a hub message to a tree-window page.
+fn post_viewer(vid: u64, msg: &ServerMsg) {
+    let Ok(vid) = u32::try_from(vid) else { return };
+    let Ok(text) = serde_json::to_string(msg) else {
+        return;
+    };
+    VIEWERS.with(|v| {
+        if let Some(port) = v.borrow().get(&vid) {
+            post_to(port, &text.into());
+        }
+    });
+}
+
+/// A Rust value as a JS value (through JSON).
+fn to_js(v: &impl serde::Serialize) -> JsValue {
+    serde_json::to_string(v)
+        .ok()
+        .and_then(|t| js_sys::JSON::parse(&t).ok())
+        .unwrap_or(JsValue::NULL)
+}
+
+/// A JS value as JSON (`null` for `undefined` and for what JSON cannot hold).
+fn from_js(v: &JsValue) -> serde_json::Value {
+    if v.is_undefined() {
+        return serde_json::Value::Null;
+    }
+    js_sys::JSON::stringify(v)
+        .ok()
+        .and_then(|s| s.as_string())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The message of a JS error (or the value itself as text).
+fn error_text(e: &JsValue) -> String {
+    Reflect::get(e, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .or_else(|| e.as_string())
+        .unwrap_or_else(|| format!("{e:?}"))
 }
 
 /// Message for a viewer from the host; large ones arrive in parts.
@@ -279,6 +586,10 @@ fn viewer_message(msg: &JsValue) {
         if last { p.remove(&vid) } else { None }
     });
     if let Some(text) = full {
+        if text.starts_with(r#"{"type":"detached""#) {
+            spawn_local(async move { leave_app(&text).await });
+            return;
+        }
         VIEWERS.with(|v| {
             if let Some(port) = v.borrow().get(&vid) {
                 post_to(port, &text.into());
@@ -300,6 +611,14 @@ fn add_listener(name: &'static str) {
                     break;
                 }
                 args.push(&v);
+            }
+            match mode() {
+                Mode::Alone => return alone::event(name, &args),
+                Mode::Host if LEAVING.with(Cell::get) => return,
+                Mode::Host => {}
+                // Events before the mode is known: the snapshot taken
+                // after it covers them.
+                Mode::Deciding | Mode::Failed(_) => return,
             }
             let msg = obj(&[
                 ("type", "event".into()),
@@ -333,20 +652,50 @@ fn connect() {
         Ok(p) => p,
         Err(e) => {
             web_sys::console::error_2(&"[treetabs] connectNative failed".into(), &e);
-            schedule_reconnect();
+            if mode() == Mode::Deciding
+                && (!SEEN.with(Cell::get) || CHOICE.with(Cell::get) == Choice::On)
+            {
+                go_alone();
+            } else {
+                schedule_reconnect();
+            }
             return;
         }
     };
+    ANSWERED.with(|a| a.set(false));
     let on_message = Closure::<dyn FnMut(JsValue)>::new(|msg: JsValue| {
+        if !ANSWERED.with(|a| a.replace(true)) {
+            host_answered();
+        }
         spawn_local(async move { handle(msg).await });
     });
-    let on_disconnect = Closure::<dyn FnMut(JsValue)>::new(|_port: JsValue| {
+    let on_disconnect = Closure::<dyn FnMut(JsValue)>::new(|port: JsValue| {
+        // Chrome sets `runtime.lastError`, Firefox the port's `error` (its
+        // `runtime.lastError` is there, but null).
+        let message = |e: JsValue| {
+            Some(e)
+                .filter(|e| !e.is_undefined() && !e.is_null())
+                .and_then(|e| Reflect::get(&e, &"message".into()).ok())
+                .and_then(|m| m.as_string())
+        };
         let err = path("runtime.lastError")
             .ok()
-            .and_then(|e| Reflect::get(&e, &"message".into()).ok())
-            .and_then(|m| m.as_string())
+            .and_then(message)
+            .or_else(|| Reflect::get(&port, &"error".into()).ok().and_then(message))
             .unwrap_or_default();
         web_sys::console::warn_1(&format!("[treetabs] host disconnected {err}").into());
+        let choice = CHOICE.with(Cell::get);
+        if mode() == Mode::Deciding
+            && host_missing(&err)
+            && (!SEEN.with(Cell::get) || choice == Choice::On)
+        {
+            go_alone();
+            if choice == Choice::On {
+                status_all("The companion app is not installed: the tree stays in the browser");
+            }
+            return;
+        }
+        set_mode(Mode::Host);
         PORT.with(|p| p.borrow_mut().take());
         VIEWERS.with(|v| {
             for port in v.borrow().values() {
@@ -377,6 +726,46 @@ fn connect() {
     web_sys::console::log_1(&"[treetabs] connected to host".into());
 }
 
+/// The companion app answered for the first time on this port.
+fn host_answered() {
+    set_mode(Mode::Host);
+    if !SEEN.with(|s| s.replace(true)) {
+        spawn_local(async {
+            let _ = call(
+                "storage.local.set",
+                &Array::of1(&obj(&[(HOST_SEEN, true.into())])),
+            )
+            .await;
+        });
+    }
+}
+
+/// The tree kept in the browser from a time without the companion app,
+/// if there is one worth handing over.
+async fn tree_to_hand_over() -> Option<JsValue> {
+    let store = match storage::load_store().await {
+        Ok(Some(s)) => s,
+        Ok(None) => return None,
+        Err(e) => {
+            web_sys::console::error_1(
+                &format!("[treetabs] the tree kept in the browser does not load: {e}").into(),
+            );
+            return None;
+        }
+    };
+    use treetabs_core::TreeStore;
+    if store.is_new() {
+        return None;
+    }
+    let json = serde_json::to_string(treetabs_core::sync::Apply::tree(&store)).ok()?;
+    // Chrome takes at most 64 MiB per message to a host.
+    if json.len() > 32 * 1024 * 1024 {
+        web_sys::console::error_1(&"[treetabs] the tree kept in the browser is too large to hand over; export it from the Data page".into());
+        return None;
+    }
+    js_sys::JSON::parse(&json).ok()
+}
+
 fn schedule_reconnect() {
     let ms = RETRY_MS.with(|r| {
         let ms = *r.borrow();
@@ -396,6 +785,24 @@ async fn handle(msg: JsValue) {
         "resync" => {
             let id = browser_id().await;
             HELD.with(|h| *h.borrow_mut() = Some(Vec::new()));
+            // Before the snapshot: a new store takes this tree as its own.
+            if let Some(tree) = tree_to_hand_over().await {
+                web_sys::console::log_1(
+                    &"[treetabs] handing the browser's tree to the companion app".into(),
+                );
+                let map = storage::bookmark_map()
+                    .await
+                    .map_or(JsValue::NULL, JsValue::from);
+                let since = storage::detached_at()
+                    .await
+                    .map_or(JsValue::NULL, |s| JsValue::from_f64(s as f64));
+                post(&obj(&[
+                    ("type", "adopt".into()),
+                    ("tree", tree),
+                    ("bookmarks", map),
+                    ("since", since),
+                ]));
+            }
             let snap = snapshot().await;
             let held = HELD.with(|h| h.borrow_mut().take()).unwrap_or_default();
             match snap {
@@ -422,22 +829,17 @@ async fn handle(msg: JsValue) {
                 .unwrap_or_default();
             let reply = match call(&api, &args).await {
                 Ok(v) => obj(&[("type", "result".into()), ("req", req), ("ok", v)]),
-                Err(e) => {
-                    let text = Reflect::get(&e, &"message".into())
-                        .ok()
-                        .and_then(|m| m.as_string())
-                        .or_else(|| e.as_string())
-                        .unwrap_or_else(|| format!("{e:?}"));
-                    obj(&[
-                        ("type", "result".into()),
-                        ("req", req),
-                        ("err", text.into()),
-                    ])
-                }
+                Err(e) => obj(&[
+                    ("type", "result".into()),
+                    ("req", req),
+                    ("err", error_text(&e).into()),
+                ]),
             };
             post(&reply);
         }
         "viewer_msg" => viewer_message(&msg),
+        // The app keeps the tree now (as its tree or as a backup).
+        "adopted" => storage::clear_all().await,
         other => web_sys::console::warn_1(&format!("[treetabs] unknown message {other}").into()),
     }
 }

@@ -21,7 +21,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 /// Snapshot after this many journal entries.
-const COMPACT_EVERY: u64 = 2000;
+pub(crate) const COMPACT_EVERY: u64 = 2000;
 /// Number of old snapshots kept in `backups/`.
 const KEEP_BACKUPS: usize = 20;
 
@@ -133,9 +133,7 @@ impl Store {
                 "{fixed} duplicate node id(s) in snapshot were renumbered"
             ));
         }
-        let base = tree.journal_seq.unwrap_or(0);
-        let mut seq = base;
-        let mut since = 0;
+        let mut replay = Replay::new(&tree, warnings);
 
         let jpath = dir.join("journal.jsonl");
         if jpath.exists() {
@@ -152,30 +150,20 @@ impl Store {
                 let entry: JournalEntry = match serde_json::from_slice(&line) {
                     Ok(e) => e,
                     Err(e) => {
-                        warnings.push(format!("journal damaged after seq {seq}: {e}"));
+                        replay.damaged(&e);
                         damaged = true;
                         break;
                     }
                 };
                 good_bytes += len;
-                if entry.seq <= base {
-                    continue;
-                }
-                if let Err(e) = tree.apply(&entry.op) {
-                    // Keep going: one bad op must not hide all later changes.
-                    warnings.push(format!(
-                        "journal seq {}: {} skipped: {e}",
-                        entry.seq,
-                        entry.op.name()
-                    ));
-                }
-                seq = seq.max(entry.seq);
-                since += 1;
+                replay.entry(&mut tree, &entry);
             }
             if damaged {
                 let keep = dir.join(format!("journal.damaged-{}.jsonl", now_ms()));
                 fs::copy(&jpath, &keep)?;
-                warnings.push(format!("damaged journal copied to {}", keep.display()));
+                replay
+                    .warnings
+                    .push(format!("damaged journal copied to {}", keep.display()));
                 let f = OpenOptions::new().write(true).open(&jpath)?;
                 f.set_len(good_bytes)?;
                 f.sync_all()?;
@@ -186,10 +174,10 @@ impl Store {
             dir: dir.to_owned(),
             tree,
             journal,
-            seq,
-            since_snapshot: since,
+            seq: replay.seq,
+            since_snapshot: replay.since,
             _lock: lock,
-            warnings,
+            warnings: replay.warnings,
         };
         if store.since_snapshot >= COMPACT_EVERY {
             store.compact()?;
@@ -282,6 +270,119 @@ impl Store {
         self.journal.sync_all()?;
         self.since_snapshot = 0;
         Ok(())
+    }
+}
+
+impl Store {
+    /// Make `tree` the store's tree, as if it had always been here. For a
+    /// store that is still new (see [`TreeStore::is_new`]); the old
+    /// snapshot is kept in `backups/`.
+    ///
+    /// # Errors
+    ///
+    /// When the snapshot cannot be written.
+    pub fn adopt(&mut self, mut tree: Tree) -> Result<(), StoreError> {
+        tree.fix_ids();
+        tree.journal_seq = Some(self.seq);
+        self.tree = tree;
+        self.compact()
+    }
+}
+
+/// What the server needs from a store: the tree, its journal position,
+/// and all-or-nothing batches. [`Store`] keeps it in files,
+/// [`MemStore`](crate::memstore::MemStore) in memory for a caller that
+/// writes it elsewhere (the extension without the companion app).
+pub trait TreeStore: crate::sync::Apply {
+    /// Journal position: the number of the last op applied.
+    fn seq(&self) -> u64;
+
+    /// Apply ops in order, all or nothing. Returns the inverses in the
+    /// same order.
+    ///
+    /// # Errors
+    ///
+    /// When an op does not fit the tree (nothing is applied then), or the
+    /// change cannot be saved.
+    fn apply_batch(&mut self, ops: Vec<Op>) -> Result<Vec<Option<Op>>, StoreError>;
+
+    /// Apply one op. Returns the inverse op.
+    ///
+    /// # Errors
+    ///
+    /// As [`TreeStore::apply_batch`].
+    fn apply(&mut self, op: Op) -> Result<Option<Op>, StoreError> {
+        let mut inv = self.apply_batch(vec![op])?;
+        Ok(inv.pop().flatten())
+    }
+
+    /// Nothing was ever stored: no op in the journal, and an empty tree.
+    fn is_new(&self) -> bool {
+        let t = self.tree();
+        self.seq() == 0 && t.root.children.is_empty() && t.trash.is_empty()
+    }
+
+    /// Replace the tree of a new store (see [`TreeStore::is_new`]).
+    ///
+    /// # Errors
+    ///
+    /// When the new tree cannot be saved.
+    fn adopt(&mut self, tree: Tree) -> Result<(), StoreError>;
+}
+
+impl TreeStore for Store {
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+    fn apply_batch(&mut self, ops: Vec<Op>) -> Result<Vec<Option<Op>>, StoreError> {
+        Store::apply_batch(self, ops)
+    }
+    fn adopt(&mut self, tree: Tree) -> Result<(), StoreError> {
+        Store::adopt(self, tree)
+    }
+}
+
+/// Journal entries applied on top of a snapshot, as a store opens.
+pub(crate) struct Replay {
+    /// `journal_seq` of the snapshot: entries up to it are in it already.
+    base: u64,
+    /// Last entry applied.
+    pub seq: u64,
+    /// Entries applied since the snapshot.
+    pub since: u64,
+    pub warnings: Vec<String>,
+}
+
+impl Replay {
+    pub fn new(tree: &Tree, warnings: Vec<String>) -> Replay {
+        let base = tree.journal_seq.unwrap_or(0);
+        Replay {
+            base,
+            seq: base,
+            since: 0,
+            warnings,
+        }
+    }
+
+    pub fn entry(&mut self, tree: &mut Tree, entry: &JournalEntry) {
+        if entry.seq <= self.base {
+            return;
+        }
+        if let Err(e) = tree.apply(&entry.op) {
+            // Keep going: one bad op must not hide all later changes.
+            self.warnings.push(format!(
+                "journal seq {}: {} skipped: {e}",
+                entry.seq,
+                entry.op.name()
+            ));
+        }
+        self.seq = self.seq.max(entry.seq);
+        self.since += 1;
+    }
+
+    pub fn damaged(&mut self, e: &dyn std::fmt::Display) {
+        self.warnings
+            .push(format!("journal damaged after seq {}: {e}", self.seq));
     }
 }
 

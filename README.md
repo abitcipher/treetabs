@@ -9,11 +9,12 @@ mirrors that tree into a bookmark folder, and stays fast with tens of thousands 
 
 **Documentation**
 
+* [User guide](docs/USER-GUIDE.md): installing and using treetabs with and without the companion app, and switching between them.
 * [Guide](docs/GUIDE.md): what treetabs does, with screenshots.
 * [Building and installing](docs/INSTALL.md): tools, build, native host, loading the extension in each browser, troubleshooting.
 * [Publishing](docs/PUBLISHING.md): Chrome Web Store (also Brave), Firefox Add-ons, Opera Add-ons.
 
-Version 0.3.0. Works with Chromium, Google Chrome, Brave, Opera and Firefox (including the Ubuntu snaps), in 15 interface languages.
+Version 0.4.3. Works with Chromium, Google Chrome, Brave, Opera and Firefox (including the Ubuntu snaps), in 15 interface languages.
 
 ---
 
@@ -30,6 +31,12 @@ Version 0.3.0. Works with Chromium, Google Chrome, Brave, Opera and Firefox (inc
 * **Extension** (`extension/`): thin. It forwards `tabs`, `windows` and
   `bookmarks` events, answers "resync" with all windows and tabs, and runs
   `chrome.*` calls for the host.
+* **Without the companion app** the extension runs the same tree logic
+  (`treetabs-sync::hub`) itself and keeps the tree in the browser's
+  extension storage, with a daily copy (7 kept). There is no desktop window
+  and no shared store then. Installing the app later hands the tree over
+  on the next browser start. A new store takes it as its tree; otherwise
+  it is kept as a backup. See [docs/OPTIONAL-HOST.md](docs/OPTIONAL-HOST.md).
 * **Server** (`treetabs-sync`): the only process that writes the store. Its
   sync engine turns browser events into tree ops; the bookmark mirror diffs
   the tree against a `treetabs` bookmark folder. It runs in whichever

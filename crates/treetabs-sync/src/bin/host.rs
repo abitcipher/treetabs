@@ -221,6 +221,7 @@ fn spawn_server_forwarder(srx: mpsc::Receiver<ServerMsg>, out: Out, gone_tx: mps
                     json!({"type": "call", "req": req, "api": api, "args": args})
                 }
                 ServerMsg::Resync => json!({"type": "resync"}),
+                ServerMsg::Adopted { backup } => json!({"type": "adopted", "backup": backup}),
                 ServerMsg::StoreMoved { dir } => {
                     // The browser starts the host again, which reads the
                     // new folder from its config.
@@ -297,6 +298,21 @@ fn to_client_msg(v: Value) -> Option<ClientMsg> {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
+        },
+        "adopt" => match v.get("tree").cloned().map(serde_json::from_value) {
+            Some(Ok(tree)) => ClientMsg::AdoptTree {
+                tree: Box::new(tree),
+                bookmarks: v
+                    .get("bookmarks")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                since: v.get("since").and_then(Value::as_u64),
+            },
+            Some(Err(e)) => {
+                log::warn!("the extension's tree does not load: {e}");
+                return None;
+            }
+            None => return None,
         },
         "result" => ClientMsg::CallResult {
             req: v.get("req").and_then(Value::as_u64)?,

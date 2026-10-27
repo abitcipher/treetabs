@@ -32,6 +32,139 @@ fn main() -> Result<()> {
     }
 }
 
+/// `treetabs-<version>-source.zip`: the sources as committed (HEAD).
+fn source_zip(root: &Path, out: &Path, version: &str) -> Result<PathBuf> {
+    let src = out.join(format!("treetabs-{version}-source.zip"));
+    let ok = Command::new("git")
+        .args(["archive", "--format=zip", "-o"])
+        .arg(&src)
+        .arg("HEAD")
+        .current_dir(root)
+        .status()?
+        .success();
+    if !ok {
+        bail!("git archive failed");
+    }
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(root)
+        .output()?;
+    if !dirty.stdout.is_empty() {
+        println!("note: uncommitted changes are not in the packages (they are built from HEAD)");
+    }
+    Ok(src)
+}
+
+/// Build the extensions from the source zip, unpacked at a fixed path:
+/// their wasm depends on where the sources are (cargo hashes the path of
+/// the project's own crates into symbol names), so with the same path
+/// addons.mozilla.org reviewers rebuild identical files. Returns the path.
+fn build_from_source(src: &Path, version: &str) -> Result<PathBuf> {
+    let build = PathBuf::from(format!("/tmp/treetabs-{version}"));
+    let _ = std::fs::remove_dir_all(&build);
+    std::fs::create_dir_all(&build)?;
+    let ok = Command::new("unzip")
+        .args(["-q"])
+        .arg(src)
+        .arg("-d")
+        .arg(&build)
+        .status()
+        .context("running unzip")?
+        .success();
+    if !ok {
+        bail!("unzip failed");
+    }
+    let ok = Command::new("cargo")
+        .args(["xtask", "build-ext", "--release"])
+        .current_dir(&build)
+        .status()?
+        .success();
+    if !ok {
+        bail!("building the extensions in {} failed", build.display());
+    }
+    Ok(build)
+}
+
+/// Drop files the extension never uses (store reviews ask for none): the
+/// TypeScript declarations wasm-bindgen writes, and icons that neither the
+/// manifest nor the tree page refers to (the logo pack in static/icons).
+fn remove_unused(dist: &Path, manifest: &serde_json::Value) -> Result<()> {
+    let page = std::fs::read_to_string(dist.join("tree.html"))?;
+    let mut used: Vec<String> = ["icons", "action"]
+        .into_iter()
+        .filter_map(|k| {
+            let v = &manifest[k];
+            v.get("default_icon").unwrap_or(v).as_object().cloned()
+        })
+        .flat_map(|o| {
+            o.into_iter()
+                .filter_map(|(_, p)| p.as_str().map(str::to_owned))
+        })
+        .collect();
+    used.extend(
+        page.split('"')
+            .filter(|s| s.starts_with("icons/"))
+            .map(str::to_owned),
+    );
+    for e in std::fs::read_dir(dist.join("icons"))? {
+        let e = e?;
+        let rel = format!("icons/{}", e.file_name().to_string_lossy());
+        if !used.contains(&rel) {
+            std::fs::remove_file(e.path())?;
+        }
+    }
+    for dir in ["wasm", "ui"] {
+        for e in std::fs::read_dir(dist.join(dir))? {
+            let e = e?;
+            if e.file_name().to_string_lossy().ends_with(".d.ts") {
+                std::fs::remove_file(e.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The extension's version, from `version = "…"` in extension/src/lib.rs.
+fn extension_version(root: &Path) -> Result<String> {
+    let lib = std::fs::read_to_string(root.join("extension/src/lib.rs"))?;
+    lib.lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("version = \"")?
+                .split('"')
+                .next()
+                .map(str::to_owned)
+        })
+        .context("no version in extension/src/lib.rs")
+}
+
+/// Compiler flags for the wasm builds: the source paths kept in them (for
+/// panic messages) start with `/cargo`, `/rustup` and `/treetabs` instead
+/// of this machine's folders. So the files do not carry the user's home
+/// folder, and a build of the same sources in another folder gives the
+/// same bytes (addons.mozilla.org rebuilds the add-on from its sources).
+fn wasm_rustflags() -> String {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let cargo = std::env::var_os("CARGO_HOME").map_or_else(|| home.join(".cargo"), PathBuf::from);
+    let rustup =
+        std::env::var_os("RUSTUP_HOME").map_or_else(|| home.join(".rustup"), PathBuf::from);
+    let mut flags: Vec<String> = [
+        (cargo, "/cargo"),
+        (rustup, "/rustup"),
+        (root(), "/treetabs"),
+    ]
+    .into_iter()
+    .map(|(from, to)| format!("--remap-path-prefix={}={to}", from.display()))
+    .collect();
+    // Keep flags the caller set.
+    if let Ok(extra) = std::env::var("RUSTFLAGS") {
+        flags.extend(extra.split_whitespace().map(str::to_owned));
+    }
+    flags.join("\x1f")
+}
+
 /// Build the extension with oxichrome, then patch the manifest: add the
 /// fixed `key` (stable extension id for the native host) and drop the
 /// `web_accessible_resources` entry oxichrome adds (pages don't need our wasm).
@@ -42,8 +175,10 @@ fn build_ext(release: bool, target: &str) -> Result<()> {
         t => bail!("unknown target {t}: chromium or firefox"),
     };
     let ext = root().join("extension");
+    let flags = wasm_rustflags();
     let mut cmd = Command::new("cargo");
     cmd.args(["oxichrome", "build", "--target", target])
+        .env("CARGO_ENCODED_RUSTFLAGS", &flags)
         .current_dir(&ext);
     if release {
         cmd.arg("--release");
@@ -59,6 +194,7 @@ fn build_ext(release: bool, target: &str) -> Result<()> {
     let ui = ext.join("ui");
     let mut cmd = Command::new("cargo");
     cmd.args(["build", "--target", "wasm32-unknown-unknown"])
+        .env("CARGO_ENCODED_RUSTFLAGS", &flags)
         .current_dir(&ui);
     if release {
         cmd.arg("--release");
@@ -117,6 +253,7 @@ fn build_ext(release: bool, target: &str) -> Result<()> {
         "_execute_action": {"suggested_key": {"default": "Alt+T"}, "description": "Open the tree window"}
     });
     std::fs::write(&manifest, serde_json::to_vec_pretty(&m)?)?;
+    remove_unused(&dist, &m)?;
     println!("extension ready: {}", manifest.parent().unwrap().display());
     Ok(())
 }
@@ -140,16 +277,11 @@ fn package() -> Result<()> {
     if !status.success() {
         bail!("cargo build --release failed");
     }
-    for t in ["chromium", "firefox"] {
-        build_ext(true, t)?;
-    }
-    // The extension's version (set in extension/src/lib.rs).
-    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        root.join("extension/dist/chromium/manifest.json"),
-    )?)?;
-    let version = manifest["version"].as_str().unwrap_or("0").to_owned();
+    let version = extension_version(&root)?;
     let out = root.join("dist");
     std::fs::create_dir_all(&out)?;
+    let src = source_zip(&root, &out, &version)?;
+    let build = build_from_source(&src, &version)?;
     let zip = |dir: &Path, name: &str| -> Result<PathBuf> {
         let file = out.join(name);
         let _ = std::fs::remove_file(&file);
@@ -166,7 +298,7 @@ fn package() -> Result<()> {
         }
         Ok(file)
     };
-    let ext = root.join("extension/dist");
+    let ext = build.join("extension/dist");
     let mut made = vec![zip(
         &ext.join("chromium"),
         &format!("treetabs-{version}-chromium-unpacked.zip"),
@@ -189,17 +321,6 @@ fn package() -> Result<()> {
         &ext.join("firefox"),
         &format!("treetabs-{version}-firefox.zip"),
     )?);
-    let src = out.join(format!("treetabs-{version}-source.zip"));
-    let ok = Command::new("git")
-        .args(["archive", "--format=zip", "-o"])
-        .arg(&src)
-        .arg("HEAD")
-        .current_dir(&root)
-        .status()?
-        .success();
-    if !ok {
-        bail!("git archive failed");
-    }
     made.push(src);
     let bin = out.join(format!("treetabs-{version}-linux-x86_64.tar.gz"));
     let ok = Command::new("tar")

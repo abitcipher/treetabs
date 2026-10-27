@@ -5,6 +5,7 @@ use super::{App, Command, SettingsTab};
 use crate::bidi::Tone;
 use crate::i18n::{self, tr, trf, trl};
 use eframe::egui::{self, RichText};
+use treetabs_core::protocol::StoreKind;
 
 impl App {
     /// Settings: a window with its own fixed text size and no title bar
@@ -73,6 +74,18 @@ impl App {
     pub(super) fn storage_ui(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(340.0);
         ui.label(tr("The tree is stored in"));
+        if self.store_kind == StoreKind::Browser {
+            ui.strong(tr("In this browser's own storage"));
+            para(
+                ui,
+                trl(
+                    "Without the companion app the tree is kept in the browser. Installing the app moves it to a folder on your computer.",
+                ),
+                Tone::Weak,
+            );
+            self.companion_switch_ui(ui, true);
+            return;
+        }
         let dir = if self.store_dir.is_empty() {
             "…".to_owned()
         } else {
@@ -105,6 +118,33 @@ impl App {
             ),
             Tone::Weak,
         );
+        self.companion_switch_ui(ui, false);
+    }
+
+    /// The button that turns the companion app on (`on`) or off, in the
+    /// extension's tree window only.
+    fn companion_switch_ui(&mut self, ui: &mut egui::Ui, on: bool) {
+        if !self.conn.companion_switch() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(tr("Companion app"));
+        para(
+            ui,
+            trl(
+                "The companion app keeps the tree in a folder on your computer, shared with the desktop window and other browsers.",
+            ),
+            Tone::Weak,
+        );
+        let label = if on {
+            tr("Use the companion app…")
+        } else {
+            tr("Stop using the companion app…")
+        };
+        if ui.button(label).clicked() {
+            self.request(Command::UseCompanionApp(on));
+        }
     }
 
     /// Settings > About.
@@ -130,7 +170,11 @@ impl App {
         );
         ui.add_space(4.0);
         ui.label(tr("The tree is stored in"));
-        ui.add(egui::Label::new(RichText::new(&self.store_dir).monospace()).selectable(true));
+        if self.store_kind == StoreKind::Browser {
+            ui.strong(tr("In this browser's own storage"));
+        } else {
+            ui.add(egui::Label::new(RichText::new(&self.store_dir).monospace()).selectable(true));
+        }
         ui.add_space(4.0);
         para(
             ui,
@@ -150,6 +194,18 @@ impl App {
             Command::EmptyTrash => (
                 trl("A copy that still has them is saved to Backups first."),
                 tr("Empty trash"),
+            ),
+            Command::UseCompanionApp(true) => (
+                trl(
+                    "Install the companion app first. The tree kept in the browser moves into the app's folder, and the extension restarts.",
+                ),
+                tr("Use the app"),
+            ),
+            Command::UseCompanionApp(false) => (
+                trl(
+                    "The tree comes along into the browser, and the extension restarts. The app's folder stays as it is, so you can switch back later.",
+                ),
+                tr("Stop using the app"),
             ),
             Command::MoveStore(_) => (
                 trl(

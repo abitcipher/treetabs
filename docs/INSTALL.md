@@ -4,9 +4,11 @@ treetabs has two parts that work together:
 
 * **the browser extension**: the tree window and the link to the browser's
   tabs, windows and bookmarks;
-* **the native host** (`treetabs-host`): a small program the browser starts
-  through *native messaging*. It keeps the tree on disk and does the
-  syncing. The extension cannot work without it.
+* **the native host** (`treetabs-host`, the *companion app*): a small
+  program the browser starts through *native messaging*. It keeps the tree
+  on disk and does the syncing. It is optional: without it the extension
+  keeps the tree in the browser's own storage. See
+  [USER-GUIDE.md](USER-GUIDE.md) for the two ways and how to switch.
 
 Optionally there is a desktop app (`treetabs-gui`) with the same tree, and a command-line tool (`treetabs`) that also installs the host.
 

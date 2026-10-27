@@ -3796,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "treetabs-cli"
-version = "0.3.0"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3807,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "treetabs-core"
-version = "0.3.0"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "js-sys",
@@ -3820,7 +3820,7 @@ dependencies = [
 
 [[package]]
 name = "treetabs-gui"
-version = "0.3.0"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3839,7 +3839,7 @@ dependencies = [
 
 [[package]]
 name = "treetabs-sync"
-version = "0.3.0"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3848,11 +3848,12 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "treetabs-core",
+ "web-time",
 ]
 
 [[package]]
 name = "treetabs-ui"
-version = "0.3.0"
+version = "0.4.3"
 dependencies = [
  "eframe",
  "egui",

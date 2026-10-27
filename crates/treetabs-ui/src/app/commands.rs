@@ -66,6 +66,15 @@ impl App {
             self.confirm = Some((trf("Move the tree to {dir}?", &[("dir", dir)]), cmd));
             return;
         }
+        if let Command::UseCompanionApp(on) = cmd {
+            let q = if on {
+                tr("Use the companion app?")
+            } else {
+                tr("Stop using the companion app?")
+            };
+            self.confirm = Some((q.to_owned(), cmd));
+            return;
+        }
         if let Command::EmptyTrash = cmd {
             let n = self.tree.trash.len();
             self.confirm = Some((
@@ -102,6 +111,10 @@ impl App {
             Command::MoveStore(dir) => {
                 self.status = trf("Moving the tree to {dir}…", &[("dir", &dir)]);
                 self.send(ClientMsg::MoveStore { dir });
+            }
+            Command::UseCompanionApp(on) => {
+                self.status = tr("Switching…").into();
+                self.send(ClientMsg::UseCompanionApp { on });
             }
             Command::EmptyTrash => {
                 // First a copy that still has them (messages stay in order).
