@@ -22,7 +22,7 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 #[oxichrome::extension(
     name = "treetabs",
-    version = "0.4.3",
+    version = "0.4.6",
     description = "Tree of windows and tabs, kept in sync with bookmarks",
     permissions = ["tabs", "bookmarks", "nativeMessaging", "storage", "unlimitedStorage", "favicon"]
 )]
@@ -59,6 +59,10 @@ const EVENTS: &[&str] = &[
 /// choice the extension uses the app when it is installed.
 const COMPANION_APP: &str = "companionApp";
 
+/// For tests only: a system name used instead of the browser's
+/// `runtime.getPlatformInfo().os`, to try other systems on Linux.
+const TEST_PLATFORM: &str = "testPlatform";
+
 /// The user's choice about the companion app (see [`COMPANION_APP`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Choice {
@@ -90,6 +94,9 @@ thread_local! {
     /// The current port got a message from the host.
     static ANSWERED: Cell<bool> = const { Cell::new(false) };
     static CHOICE: Cell<Choice> = const { Cell::new(Choice::Auto) };
+    /// Whether the companion app exists for this system; `None` until
+    /// known. Without it the app is never started or mentioned.
+    static APP_EXISTS: Cell<Option<bool>> = const { Cell::new(None) };
     /// The tree is on its way from the app to the browser: browser events
     /// are not sent to the app any more (the snapshot taken afterwards
     /// covers them).
@@ -197,7 +204,11 @@ async fn start() {
     let _ = Reflect::set(&js_sys::global(), &"treetabsTree".into(), tree.as_ref());
     tree.forget();
     spawn_local(async {
-        let keys = Array::of2(&HOST_SEEN.into(), &COMPANION_APP.into());
+        let keys = Array::of3(
+            &HOST_SEEN.into(),
+            &COMPANION_APP.into(),
+            &TEST_PLATFORM.into(),
+        );
         let saved = call("storage.local.get", &Array::of1(&keys))
             .await
             .unwrap_or(JsValue::UNDEFINED);
@@ -213,12 +224,45 @@ async fn start() {
             _ => Choice::Auto,
         };
         CHOICE.with(|c| c.set(choice));
-        if choice == Choice::Off {
+        let exists = app_exists(&saved).await;
+        APP_EXISTS.with(|a| a.set(Some(exists)));
+        VIEWERS.with(|v| {
+            for port in v.borrow().values() {
+                post_to(port, &app_exists_json(exists));
+            }
+        });
+        if !exists || choice == Choice::Off {
             go_alone();
         } else {
             connect();
         }
     });
+}
+
+/// Whether the companion app exists for this system (see
+/// [`treetabs_core::protocol::companion_app_exists`]). If the browser does
+/// not say, as if it did: the extension tries the app and falls back.
+async fn app_exists(saved: &JsValue) -> bool {
+    let os = match Reflect::get(saved, &TEST_PLATFORM.into())
+        .ok()
+        .and_then(|v| v.as_string())
+    {
+        Some(os) => Some(os),
+        None => call("runtime.getPlatformInfo", &Array::new())
+            .await
+            .ok()
+            .and_then(|info| Reflect::get(&info, &"os".into()).ok())
+            .and_then(|os| os.as_string()),
+    };
+    os.is_none_or(|os| treetabs_core::protocol::companion_app_exists(&os))
+}
+
+/// Tells a tree window whether to offer the companion app. Handled by the
+/// window itself, not by the editor.
+fn app_exists_json(exists: bool) -> JsValue {
+    serde_json::json!({ "type": "companion_app", "exists": exists })
+        .to_string()
+        .into()
 }
 
 async fn save_choice(choice: Choice) {
@@ -251,6 +295,10 @@ fn companion_request(vid: u32, text: &str) -> bool {
     else {
         return false;
     };
+    // No app for this system: the window does not offer it either.
+    if APP_EXISTS.with(Cell::get) == Some(false) {
+        return true;
+    }
     match (mode(), on) {
         (Mode::Alone, true) => spawn_local(use_app()),
         // The app sends the tree along (see `leave_app`).
@@ -489,6 +537,9 @@ fn viewer_connected(port: JsValue) {
     on_msg.forget();
     on_disconnect.forget();
     VIEWERS.with(|v| v.borrow_mut().insert(vid, port.clone()));
+    if let Some(exists) = APP_EXISTS.with(Cell::get) {
+        post_to(&port, &app_exists_json(exists));
+    }
     match mode() {
         Mode::Alone => alone::viewer_open(vid),
         Mode::Failed(msg) => post_to(&port, &status_json(&msg)),

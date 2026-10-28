@@ -82,8 +82,9 @@ async function state() {
         const snap = got.find((m) => m.type === 'snapshot');
         const opts = got.find((m) => m.type === 'store_options');
         const status = got.filter((m) => m.type === 'status').map((m) => m.message);
+        const app = got.find((m) => m.type === 'companion_app')?.exists ?? null;
         const keys = Object.keys(await browser.storage.local.get(null)).filter((k) => k.startsWith('tt.'));
-        done({ mode: bg?.treetabsMode?.() ?? null, probe: bg?.__probe ?? null, kind: opts?.kind ?? null, tree: snap?.tree ?? null, status, keys: keys.length });
+        done({ mode: bg?.treetabsMode?.() ?? null, probe: bg?.__probe ?? null, kind: opts?.kind ?? null, tree: snap?.tree ?? null, status, keys: keys.length, app });
       })().catch((e) => done({ error: String(e) }));`,
     args: [],
   });
@@ -112,6 +113,8 @@ try {
   if (st.error) console.log('ERROR', st.error);
   // console.log('INFO mode', st.mode, 'kind', st.kind, 'status', JSON.stringify(st.status));
   check('Firefox runs without the app', st.mode === 'alone' && st.kind === 'browser');
+  // On Linux the tree window offers the app (Firefox gives the system too).
+  check('the app is offered on Linux', st.app === true, String(st.app));
   check('tabs are tracked and nested', st.tree && lines(st.tree).includes('tab /p/fox\n    tab /p/fox-child'), st.tree ? '\n' + lines(st.tree) : '');
 
   // Idle with no add-on page open: does the background stay?
@@ -135,7 +138,12 @@ try {
   check('a closed tab goes to the trash', (st.tree?.trash ?? []).some((t) => t.node.url === `${S}/p/fox-child`));
   check('it is saved in the browser storage', st.keys > 2, `keys=${st.keys}`);
 
-  // Restart Firefox with the same profile.
+  // Restart Firefox with the same profile, as if on Windows from now on.
+  await wd('POST', `/session/${sid}/execute/async`, {
+    script: `const done = arguments[arguments.length - 1];
+      browser.storage.local.set({ testPlatform: 'win' }).then(() => done(true));`,
+    args: [],
+  });
   await wd('DELETE', `/session/${sid}`);
   sid = null;
   await sleep(1000);
@@ -146,6 +154,7 @@ try {
   // console.log('INFO after restart mode', st.mode, '\n' + (st.tree ? lines(st.tree) : st.error));
   check('after a restart the tree is still there', st.tree && lines(st.tree).includes('/p/fox'));
   check('after a restart the trash is kept', (st.tree?.trash ?? []).some((t) => t.node.url === `${S}/p/fox-child`));
+  check('on Windows the app is not offered', st.mode === 'alone' && st.app === false, `${st.mode} ${st.app}`);
 
   // Double-click a saved tab (what the tree window sends): it opens, and
   // the saved node becomes that tab, without a second node.

@@ -1,6 +1,6 @@
 [package]
 name = "treetabs-core"
-description = "Tree model and readers for Tabs Outliner data (JSON export and Chromium IndexedDB)"
+description = "treetabs tree model, journaled store and file formats"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true

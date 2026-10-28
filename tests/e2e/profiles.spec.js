@@ -20,8 +20,9 @@ test('two browser profiles in one tree: labels and a profile filter', async () =
   const two = await launch(profile2);
   await two.pages()[0].goto(`${s}/p/two`);
   await eventually(() => expect(shape(liveTree(env.store), s)).toBe('window\n  tab /p/one\nwindow\n  tab /p/two'));
-  const names = JSON.parse(fs.readFileSync(path.join(env.store, 'profiles.json'), 'utf8'));
-  expect(Object.values(names)).toEqual(['Chromium', 'Chromium']);
+  // profiles.json can be written a moment after the tree.
+  const names = () => JSON.parse(fs.readFileSync(path.join(env.store, 'profiles.json'), 'utf8'));
+  await eventually(() => expect(Object.values(names())).toEqual(['Chromium', 'Chromium']));
 
   const sw = one.serviceWorkers()[0];
   const [tree] = await Promise.all([one.waitForEvent('page'), sw.evaluate(() => treetabsOpenTree())]);

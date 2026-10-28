@@ -7,7 +7,7 @@ use treetabs_core::{JsonStyle, idb, tabs_outliner};
 #[derive(Parser)]
 #[command(
     name = "treetabs",
-    about = "Read Tabs Outliner data and convert it to portable JSON"
+    about = "treetabs: the tree store, import, export and recovery"
 )]
 struct Cli {
     #[command(subcommand)]

@@ -1,4 +1,9 @@
-//! Build helpers: `cargo xtask build-ext [--release] [--target chromium|firefox]` (both targets when none is given).
+//! Build helpers:
+//! - `cargo xtask build-ext [--release] [--target chromium|firefox]` (both targets when none is given);
+//! - `cargo xtask package`: the store and release packages in `dist/`;
+//! - `cargo xtask bump <patch|minor|major|x.y.z>`: a new version everywhere;
+//! - `cargo xtask version`: print the version;
+//! - `cargo xtask tools [--install]`: check (or install) the build tools.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -25,11 +30,163 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some("package") => package(),
+        Some("package") => {
+            tools(false)?;
+            package()
+        }
+        Some("bump") => {
+            let to = args
+                .get(1)
+                .context("usage: cargo xtask bump <patch|minor|major|x.y.z>")?;
+            let version = bump(&root(), to)?;
+            println!("{version}");
+            Ok(())
+        }
+        Some("version") => {
+            println!("{}", extension_version(&root())?);
+            Ok(())
+        }
+        Some("tools") => tools(args.iter().any(|a| a == "--install")),
         _ => bail!(
-            "usage: cargo xtask build-ext [--release] [--target chromium|firefox] | cargo xtask package"
+            "usage: cargo xtask build-ext [--release] [--target chromium|firefox] | package | bump <patch|minor|major|x.y.z> | version | tools [--install]"
         ),
     }
+}
+
+/// The tools the extension build runs, as `cargo install` packages with
+/// exact versions. Other versions give other wasm files, and the store
+/// reviewers rebuild from the source zip with these.
+const TOOLS: &[(&str, &str)] = &[
+    // Must match the `wasm-bindgen` crate in extension/Cargo.lock.
+    ("wasm-bindgen-cli", "0.2.129"),
+    // Binaryen 116, built from source. Ubuntu's apt package is older.
+    ("wasm-opt", "0.116.1"),
+    ("cargo-oxichrome", "0.2.0"),
+];
+
+/// Check that the build tools have the versions in [`TOOLS`]; with
+/// `install`, install the ones that don't.
+fn tools(install: bool) -> Result<()> {
+    let lock = std::fs::read_to_string(root().join("extension/Cargo.lock"))?;
+    let bindgen = lock
+        .split("[[package]]")
+        .find(|p| p.contains("name = \"wasm-bindgen\"\n"))
+        .and_then(|p| p.split("version = \"").nth(1)?.split('"').next())
+        .context("no wasm-bindgen in extension/Cargo.lock")?;
+    if !TOOLS.contains(&("wasm-bindgen-cli", bindgen)) {
+        bail!("extension/Cargo.lock has wasm-bindgen {bindgen}: update TOOLS in xtask/src/main.rs");
+    }
+    let listed = Command::new("cargo").args(["install", "--list"]).output()?;
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    let mut wrong = Vec::new();
+    for (krate, version) in TOOLS {
+        if !listed
+            .lines()
+            .any(|l| l.starts_with(&format!("{krate} v{version}:")))
+        {
+            wrong.push(format!("{krate}@{version}"));
+        }
+    }
+    if wrong.is_empty() {
+        return Ok(());
+    }
+    if !install {
+        bail!(
+            "build tools missing or at other versions: {}. Run: cargo xtask tools --install",
+            wrong.join(", ")
+        );
+    }
+    for spec in wrong {
+        let ok = Command::new("cargo")
+            .args(["install", "--locked", &spec])
+            .status()?
+            .success();
+        if !ok {
+            bail!("cargo install {spec} failed");
+        }
+    }
+    Ok(())
+}
+
+/// The next version after `current` for `to` (`patch`, `minor`, `major`, or
+/// an explicit `x.y.z`).
+fn next_version(current: &str, to: &str) -> Result<String> {
+    let parse = |v: &str| -> Result<[u64; 3]> {
+        let parts: Vec<u64> = v.split('.').map(str::parse).collect::<Result<_, _>>()?;
+        <[u64; 3]>::try_from(parts).map_err(|_| anyhow::anyhow!("not x.y.z: {v}"))
+    };
+    let [major, minor, patch] = parse(current)?;
+    let next = match to {
+        "patch" => format!("{major}.{minor}.{}", patch + 1),
+        "minor" => format!("{major}.{}.0", minor + 1),
+        "major" => format!("{}.0.0", major + 1),
+        explicit => {
+            parse(explicit)?;
+            explicit.to_owned()
+        }
+    };
+    if parse(&next)? <= parse(current)? {
+        bail!("{next} is not after {current}");
+    }
+    Ok(next)
+}
+
+/// Set a new version in every place that has it, and update the lock
+/// files. Returns the new version.
+fn bump(root: &Path, to: &str) -> Result<String> {
+    let old = extension_version(root)?;
+    let new = next_version(&old, to)?;
+    let edits: &[(&str, String, String)] = &[
+        (
+            "Cargo.toml",
+            format!("\nversion = \"{old}\"\n"),
+            format!("\nversion = \"{new}\"\n"),
+        ),
+        (
+            "extension/Cargo.toml",
+            format!("\nversion = \"{old}\"\n"),
+            format!("\nversion = \"{new}\"\n"),
+        ),
+        (
+            "extension/ui/Cargo.toml",
+            format!("\nversion = \"{old}\"\n"),
+            format!("\nversion = \"{new}\"\n"),
+        ),
+        (
+            "extension/src/lib.rs",
+            format!("    version = \"{old}\","),
+            format!("    version = \"{new}\","),
+        ),
+        (
+            "README.md",
+            format!("Version {old}."),
+            format!("Version {new}."),
+        ),
+        (
+            "docs/USER-GUIDE.md",
+            format!("treetabs-{old}-"),
+            format!("treetabs-{new}-"),
+        ),
+    ];
+    for (file, from, to) in edits {
+        let path = root.join(file);
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {file}"))?;
+        if !text.contains(from.as_str()) {
+            bail!("{file}: version {old} not found");
+        }
+        std::fs::write(&path, text.replace(from.as_str(), to))?;
+    }
+    for dir in [".", "extension", "extension/ui"] {
+        let ok = Command::new("cargo")
+            .args(["update", "--workspace", "-q"])
+            .current_dir(root.join(dir))
+            .status()?
+            .success();
+        if !ok {
+            bail!("cargo update in {dir} failed");
+        }
+    }
+    Ok(new)
 }
 
 /// `treetabs-<version>-source.zip`: the sources as committed (HEAD).
@@ -358,4 +515,20 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_version;
+
+    #[test]
+    fn versions_go_up() {
+        assert_eq!(next_version("0.4.5", "patch").unwrap(), "0.4.6");
+        assert_eq!(next_version("0.4.5", "minor").unwrap(), "0.5.0");
+        assert_eq!(next_version("0.4.5", "major").unwrap(), "1.0.0");
+        assert_eq!(next_version("0.4.5", "0.4.10").unwrap(), "0.4.10");
+        assert!(next_version("0.4.5", "0.4.5").is_err());
+        assert!(next_version("0.4.5", "0.3.9").is_err());
+        assert!(next_version("0.4.5", "1.0").is_err());
+    }
 }

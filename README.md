@@ -12,9 +12,8 @@ mirrors that tree into a bookmark folder, and stays fast with tens of thousands 
 * [User guide](docs/USER-GUIDE.md): installing and using treetabs with and without the companion app, and switching between them.
 * [Guide](docs/GUIDE.md): what treetabs does, with screenshots.
 * [Building and installing](docs/INSTALL.md): tools, build, native host, loading the extension in each browser, troubleshooting.
-* [Publishing](docs/PUBLISHING.md): Chrome Web Store (also Brave), Firefox Add-ons, Opera Add-ons.
 
-Version 0.4.3. Works with Chromium, Google Chrome, Brave, Opera and Firefox (including the Ubuntu snaps), in 15 interface languages.
+Version 0.4.6. Works with Chromium, Google Chrome, Brave, Opera and Firefox (including the Ubuntu snaps), in 15 interface languages.
 
 ---
 
@@ -47,16 +46,13 @@ Version 0.4.3. Works with Chromium, Google Chrome, Brave, Opera and Firefox (inc
   snapshots go to `backups/`). Removed nodes go to a trash instead of being
   deleted.
 * **Tree window**: the extension's toolbar button opens (or focuses) a
-  popup window at the left screen edge with the tree, like Tabs Outliner.
+  popup window at the left screen edge with the tree.
   It is the same editor as the desktop app (`treetabs-ui`, egui), compiled
   to wasm (`extension/ui`). It reaches the server through the extension and
   the native host.
 * **GUI** (`treetabs-gui`): the same editor as a desktop app, over the local
   socket. Drag and drop, undo/redo, trash with restore, search,
   open/focus/close in the browser.
-
-Why Tabs Outliner loses tabs, and what we do differently:
-[docs/tabs-outliner-notes.md](docs/tabs-outliner-notes.md).
 
 ### Behaviour
 
@@ -73,9 +69,8 @@ Why Tabs Outliner loses tabs, and what we do differently:
   bookmark, then its children. Renaming, moving, deleting or adding
   bookmarks there changes the tree. Turn it off with
   `{"bookmarks": false}` in `<store>/settings.json`.
-* Data tab: export the tree as treetabs JSON, Tabs Outliner JSON,
-  bookmarks HTML or a Markdown list; import treetabs or Tabs Outliner
-  JSON (added as a group). Settings > Storage shows where the tree is kept
+* Data tab: export the tree as JSON, bookmarks HTML or a Markdown list;
+  import a JSON file (added as a group). Settings > Storage shows where the tree is kept
   and moves it to another folder; Settings > About.
 * Backups: once a day the tree is exported as plain JSON to
   `<store>/exports/treetabs-YYYY-MM-DD.json`; the last 30 are kept
@@ -139,9 +134,9 @@ target/release/treetabs install-host --browser chromium-snap --set-default
 
 ```sh
 treetabs convert <export.json | idb-folder> -o tree.json --pretty
-treetabs convert tree.json -f tabs-outliner -o export.json  # back to Tabs Outliner
-treetabs import <export.json | idb-folder>   # start a new store from Tabs Outliner data
-treetabs history <idb-folder> --recover out.json  # tabs only in older Tabs Outliner versions
+treetabs convert tree.json -f tabs-outliner -o export.json  # write another format
+treetabs import <export.json | idb-folder>   # start a new store from imported data
+treetabs history <idb-folder> --recover out.json  # recover tabs from an older copy
 treetabs live [--json]                       # print the live tree
 treetabs open <node-id>                      # open/focus a node in the browser
 treetabs serve                               # run the server in the foreground
@@ -177,6 +172,16 @@ FIREFOX_TEST=1 npx playwright test firefox.spec.js  # snap Firefox via geckodriv
 `waiting_tab`, `attach_waiting_tab`, `group`, `note`, `separator`. 
 Fields without a name of their own stay in `data`, `marks` and `extra`.
 
+
+### Support
+
+treetabs is free, with no ads and no paid features. If it is useful to
+you, you can [donate with PayPal](https://www.paypal.com/donate/?hosted_button_id=TQTXU7ZB92CCL)
+or scan the code below with your phone. In treetabs it is under
+Settings > Support (the ♥ in the status bar). Settings > Credits lists
+the projects treetabs is built on.
+
+<img src="crates/treetabs-ui/assets/donate-qr.png" width="140" alt="QR code of the PayPal donation page for treetabs">
 
 ### License
 

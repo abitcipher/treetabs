@@ -504,8 +504,8 @@ pub(super) fn add_node(
     let has_children = !n.children.is_empty();
     let id = n.id;
     let openable = n.url.is_some() || has_children;
-    // Every node is a directory so anything can be dropped onto anything,
-    // like in Tabs Outliner. Empty ones get a blank closer.
+    // Every node is a directory so anything can be dropped onto anything.
+    // Empty ones get a blank closer.
     let top = rows.next_row.get();
     rows.next_row.set(top + rows.row_step);
     let mut nb = NodeBuilder::dir(id)

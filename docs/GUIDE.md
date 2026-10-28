@@ -110,7 +110,7 @@ Turn it off with `{"bookmarks": false}` in `<store>/settings.json`
 
 ## Settings
 
-⚙ opens the settings, in three tabs. Changes apply right away and are remembered.
+⚙ opens the settings, in five tabs. Changes apply right away and are remembered.
 
 ![Settings](images/settings.png)
 
@@ -134,6 +134,14 @@ The **Companion app** button below turns the app on or off; see
 
 ![Settings: About](images/settings-about.png)
 
+**Support**: treetabs is free, with no ads and no paid features. To
+support it, click **Donate with PayPal** (PayPal's page opens in a new
+tab), or scan the code with your phone's camera. The small ♥ at the end
+of the status bar opens this tab. Donations unlock nothing.
+
+**Credits**: the projects treetabs is built on, with their licenses.
+Each name opens the project's page.
+
 ![Dark theme](images/dark.png)
 
 ## Languages
@@ -152,19 +160,16 @@ In Arabic the interface is mirrored: the bars run right to left and the panel is
 
 Chromium, Google Chrome, Brave, Opera and Firefox, including the Ubuntu snap versions. Several browsers can share one tree, each window labelled with its browser. See [INSTALL.md](INSTALL.md).
 
-## Moving from Tabs Outliner
+## Importing from another tab manager
+
+The `treetabs` command can also start a tree from a Tabs Outliner export, or from its IndexedDB folder. Titles, notes, saved windows and collapsed state are kept:
 
 ```sh
-treetabs import tabs-outliner-export.json      # or the Tabs Outliner IndexedDB folder
-treetabs history <idb-folder> --recover lost.json   # tabs only older Tabs Outliner versions still had
+treetabs import export.json
+treetabs history <idb-folder> --recover lost.json   # tabs that only an older copy still has
 ```
 
-The import keeps everything Tabs Outliner stored (titles, notes, saved windows, collapsed state), and writes it back in Tabs Outliner's format
-
-```sh
-treetabs convert tree.json -f tabs-outliner -o export.json
-``` 
-
+`treetabs convert tree.json -f tabs-outliner -o export.json` writes that format back.
 
 ## Large trees
 

@@ -200,6 +200,15 @@ pub enum ServerMsg {
     },
 }
 
+/// Whether the companion app exists for a system, as named by the
+/// browser's `runtime.getPlatformInfo().os` ("linux", "win", "mac",
+/// "android", "cros", "openbsd", "fuchsia"). Only Linux so far: elsewhere
+/// the extension keeps the tree itself and does not mention the app.
+#[must_use]
+pub fn companion_app_exists(os: &str) -> bool {
+    os == "linux"
+}
+
 /// Write one message as a JSON line.
 ///
 /// # Errors
@@ -296,5 +305,14 @@ mod native_tests {
         let mut input: &[u8] = &u32::MAX.to_ne_bytes();
         let err = native::read(&mut input).expect_err("too large");
         assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    #[test]
+    fn the_companion_app_exists_only_for_linux() {
+        use crate::protocol::companion_app_exists;
+        assert!(companion_app_exists("linux"));
+        for os in ["win", "mac", "android", "cros", "openbsd", "fuchsia", ""] {
+            assert!(!companion_app_exists(os), "{os}");
+        }
     }
 }

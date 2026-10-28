@@ -1,8 +1,8 @@
 //! One frame of the window: shortcuts, bars, side panel and tree.
 
-use super::layout::line;
+use super::layout::{far, line};
 use super::rows::{Found, add_node, node_icon, node_menu, profile_labels, profile_of, row_label};
-use super::{App, Command, Rows, Scope};
+use super::{App, Command, Rows, Scope, SettingsTab};
 use crate::i18n::{self, tr, trf};
 use crate::search;
 use crate::settings::PanelTab;
@@ -147,6 +147,18 @@ impl App {
             }
             ui.separator();
             ui.label(&self.status);
+            // Always there, never in the way: opens Settings > Support.
+            ui.with_layout(far(), |ui| {
+                let heart = RichText::new("♥").color(ui.visuals().weak_text_color());
+                if ui
+                    .add(egui::Button::new(heart).frame(false))
+                    .on_hover_text(tr("Support treetabs"))
+                    .clicked()
+                {
+                    self.settings_tab = SettingsTab::Support;
+                    self.show_settings = true;
+                }
+            });
         });
     }
 

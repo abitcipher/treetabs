@@ -1,4 +1,5 @@
-//! Settings (Interface, Storage, About) and the confirmation dialog.
+//! Settings (Interface, Storage, About; Support and Credits are in
+//! `support.rs`) and the confirmation dialog.
 
 use super::layout::{far, line, para};
 use super::{App, Command, SettingsTab};
@@ -47,6 +48,8 @@ impl App {
                         SettingsTab::Interface,
                         SettingsTab::Storage,
                         SettingsTab::About,
+                        SettingsTab::Support,
+                        SettingsTab::Credits,
                     ] {
                         ui.selectable_value(&mut self.settings_tab, tab, tab.label());
                     }
@@ -57,6 +60,8 @@ impl App {
                     .show(ui, |ui| match self.settings_tab {
                         SettingsTab::Storage => self.storage_ui(ui),
                         SettingsTab::About => self.about_ui(ui),
+                        SettingsTab::Support => self.support_ui(ui),
+                        SettingsTab::Credits => self.credits_ui(ui),
                         SettingsTab::Interface => {
                             if self.settings.ui(ui) {
                                 self.settings.apply(ctx);
@@ -76,14 +81,17 @@ impl App {
         ui.label(tr("The tree is stored in"));
         if self.store_kind == StoreKind::Browser {
             ui.strong(tr("In this browser's own storage"));
-            para(
-                ui,
-                trl(
-                    "Without the companion app the tree is kept in the browser. Installing the app moves it to a folder on your computer.",
-                ),
-                Tone::Weak,
-            );
-            self.companion_switch_ui(ui, true);
+            // Where there is no companion app, it is not mentioned.
+            if self.conn.companion_switch() {
+                para(
+                    ui,
+                    trl(
+                        "Without the companion app the tree is kept in the browser. Installing the app moves it to a folder on your computer.",
+                    ),
+                    Tone::Weak,
+                );
+                self.companion_switch_ui(ui, true);
+            }
             return;
         }
         let dir = if self.store_dir.is_empty() {

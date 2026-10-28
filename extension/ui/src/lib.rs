@@ -3,7 +3,7 @@
 //! the native host, which connects to the treetabs server as a viewer.
 
 use js_sys::{Function, Object, Reflect};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use treetabs_core::protocol::{ClientMsg, ServerMsg};
@@ -25,6 +25,9 @@ struct PortTransport {
     origin: String,
     /// A file picked for import, once read.
     picked: PickedFile,
+    /// The background said the companion app exists for this system, so
+    /// Settings > Storage offers it.
+    app_exists: Rc<Cell<bool>>,
 }
 
 fn chrome_path(p: &str) -> Result<JsValue, JsValue> {
@@ -47,6 +50,19 @@ fn add_listener(target: &JsValue, event: &str, cb: &JsValue) -> Result<(), JsVal
     Ok(())
 }
 
+/// The background's note whether the companion app exists for this system:
+/// `{"type":"companion_app","exists":…}`.
+fn companion_app_note(text: &str) -> Option<bool> {
+    // Cheap check first: tree messages can be megabytes.
+    if text.len() > 100 || !text.contains(r#""companion_app""#) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    (v.get("type")?.as_str()? == "companion_app")
+        .then(|| v.get("exists")?.as_bool())
+        .flatten()
+}
+
 impl PortTransport {
     fn open(&mut self) -> Result<(), JsValue> {
         let runtime = chrome_path("runtime")?;
@@ -57,8 +73,14 @@ impl PortTransport {
 
         let inbox = self.inbox.clone();
         let ctx = self.ctx.clone();
+        let app_exists = self.app_exists.clone();
         let on_msg = Closure::<dyn FnMut(JsValue)>::new(move |m: JsValue| {
             let Some(text) = m.as_string() else { return };
+            if let Some(exists) = companion_app_note(&text) {
+                app_exists.set(exists);
+                ctx.request_repaint();
+                return;
+            }
             match serde_json::from_str::<ServerMsg>(&text) {
                 Ok(msg) => inbox.borrow_mut().msgs.push_back(msg),
                 Err(e) => web_sys::console::warn_1(&format!("[treetabs] bad message: {e}").into()),
@@ -116,7 +138,7 @@ impl Transport for PortTransport {
     }
 
     fn companion_switch(&self) -> bool {
-        true
+        self.app_exists.get()
     }
 
     fn describe(&self) -> String {
@@ -359,6 +381,7 @@ pub fn start() {
                         ctx: cc.egui_ctx.clone(),
                         origin,
                         picked: Default::default(),
+                        app_exists: Default::default(),
                     };
                     if let Err(e) = t.open() {
                         web_sys::console::error_2(

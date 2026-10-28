@@ -12,6 +12,7 @@ mod panels;
 #[cfg(test)]
 mod perf;
 mod rows;
+mod support;
 mod toolbar;
 mod tree;
 mod windows;
@@ -118,6 +119,8 @@ enum SettingsTab {
     Interface,
     Storage,
     About,
+    Support,
+    Credits,
 }
 
 impl SettingsTab {
@@ -126,6 +129,8 @@ impl SettingsTab {
             SettingsTab::Interface => tr("Interface"),
             SettingsTab::Storage => tr("Storage"),
             SettingsTab::About => tr("About"),
+            SettingsTab::Support => tr("Support"),
+            SettingsTab::Credits => tr("Credits"),
         }
     }
 }

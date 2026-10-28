@@ -148,3 +148,57 @@ test('the companion app can be turned off and on again', async () => {
   await ctx.close();
   srv.close();
 });
+
+/// What the background tells a new tree window about the companion app:
+/// true or false, or undefined if it says nothing.
+async function appOffered(ctx, sw) {
+  let tree = ctx.pages().find((p) => p.url().endsWith('/tree.html'));
+  if (!tree) {
+    [tree] = await Promise.all([ctx.waitForEvent('page'), sw.evaluate(() => treetabsOpenTree())]);
+    await tree.waitForLoadState();
+  }
+  return tree.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const port = chrome.runtime.connect({ name: 'viewer' });
+        port.onMessage.addListener((m) => {
+          const msg = JSON.parse(m);
+          if (msg.type === 'companion_app') resolve(msg.exists);
+        });
+        setTimeout(() => resolve(undefined), 3000);
+      }),
+  );
+}
+
+test('on systems without the companion app it is neither used nor offered', async () => {
+  const env = bareProfile('other-os');
+  const srv = await pageServer();
+  const s = srv.url;
+  let ctx = await launch(env.profile);
+  let sw = ctx.serviceWorkers()[0];
+  await eventually(async () => expect(await mode(sw)).toBe('alone'));
+  // On Linux the tree window offers the app.
+  expect(await appOffered(ctx, sw)).toBe(true);
+  const page = ctx.pages().find((p) => p.url().startsWith('about:')) ?? (await ctx.newPage());
+  await page.goto(`${s}/p/win`);
+  await eventually(async () => expect(shape(await ownTree(sw), s)).toContain('tab /p/win'));
+  // From now on the extension thinks it runs on Windows.
+  await sw.evaluate(() => chrome.storage.local.set({ testPlatform: 'win' }));
+  await new Promise((r) => setTimeout(r, 1000));
+  await ctx.close();
+
+  // The app is installed, but on Windows it does not exist: not started.
+  cli('install-host', '--user-data-dir', env.profile, '--store', env.store, '--host', path.join(BIN, 'treetabs-host'));
+  ctx = await launch(env.profile);
+  sw = ctx.serviceWorkers()[0];
+  await eventually(async () => expect(await mode(sw)).toBe('alone'));
+  await eventually(async () => expect(shape(await ownTree(sw), s)).toContain('saved_tab /p/win'));
+  expect(await appOffered(ctx, sw)).toBe(false);
+  // Asking for it anyway changes nothing.
+  await useApp(ctx, sw, true);
+  await new Promise((r) => setTimeout(r, 2000));
+  expect(await mode(sw)).toBe('alone');
+  expect(fs.existsSync(path.join(env.store, 'journal.jsonl'))).toBe(false);
+  await ctx.close();
+  srv.close();
+});

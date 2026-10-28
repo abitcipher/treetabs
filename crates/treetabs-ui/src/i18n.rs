@@ -334,6 +334,7 @@ mod tests {
             include_str!("app/layout.rs"),
             include_str!("app/panels.rs"),
             include_str!("app/rows.rs"),
+            include_str!("app/support.rs"),
             include_str!("app/toolbar.rs"),
             include_str!("app/tree.rs"),
             include_str!("app/windows.rs"),

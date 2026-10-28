@@ -1,0 +1,7 @@
+# The exact compiler for every build: the store packages are rebuilt from
+# the source zip by reviewers, and another Rust version gives other files.
+[toolchain]
+channel = "1.99.1"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]
+profile = "minimal"

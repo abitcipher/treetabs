@@ -1,7 +1,7 @@
 [package]
 name = "treetabs-extension"
 description = "Browser extension: relays tabs, windows and bookmarks to the treetabs native host, or owns the tree itself without it"
-version = "0.4.3"
+version = "0.4.6"
 edition = "2024"
 license = "MIT"
 
