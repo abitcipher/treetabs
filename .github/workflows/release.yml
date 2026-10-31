@@ -1,0 +1,198 @@
+# A release: run it from the Actions tab ("Run workflow", with patch, minor,
+# major or x.y.z), or push a tag vX.Y.Z yourself. It
+#   1. (when run from the tab) sets the new version everywhere, commits and tags;
+#   2. runs CI on the tag: checks, tests, packages;
+#   3. publishes a GitHub release with the packages and the source zip;
+#   4. submits to the Chrome Web Store and Firefox Add-ons, if set up
+#      (see the "stores" environment and the variables below).
+# Opera has no upload API: its package is on the GitHub release.
+#
+# Repository variables: CWS_EXTENSION_ID, CWS_PUBLISHER_ID, optional
+# CWS_PUBLISH_TYPE (DEFAULT_PUBLISH or STAGED_PUBLISH), and either
+# GCP_WORKLOAD_IDENTITY_PROVIDER + CWS_SERVICE_ACCOUNT or the secret
+# CWS_SERVICE_ACCOUNT_KEY; AMO_ENABLED=true with the secrets AMO_JWT_ISSUER
+# and AMO_JWT_SECRET.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version: patch, minor, major, or x.y.z"
+        required: true
+        default: patch
+      stores:
+        description: Also submit to the Chrome Web Store and Firefox Add-ons
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency: release
+
+jobs:
+  bump:
+    name: New version
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install
+      - name: Bump, commit, tag, push
+        id: bump
+        env:
+          TO: ${{ inputs.version }}
+        run: |
+          version=$(cargo xtask bump "$TO")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qam "Version $version"
+          git tag -a "v$version" -m "treetabs $version"
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME" "v$version"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: CI
+    needs: bump
+    if: ${{ !cancelled() && needs.bump.result != 'failure' }}
+    # CI's edge job asks for write access (it does not run here).
+    permissions:
+      contents: write
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.bump.outputs.tag || github.ref_name }}
+
+  github:
+    name: GitHub release
+    needs: [bump, ci]
+    if: ${{ !cancelled() && needs.ci.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.bump.outputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: The packages are this version
+        run: |
+          v=${TAG#v}
+          ls dist
+          for f in chrome-web-store.zip chromium-unpacked.zip firefox.zip source.zip linux-x86_64.tar.gz; do
+            test -f "dist/treetabs-$v-$f" || { echo "missing treetabs-$v-$f"; exit 1; }
+          done
+      - name: Publish
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "treetabs ${TAG#v}" --generate-notes
+          fi
+      - name: Summary
+        run: |
+          v=${TAG#v}
+          url="https://github.com/$GH_REPO/releases/download/$TAG"
+          {
+            echo "### treetabs $v"
+            echo "- GitHub release: https://github.com/$GH_REPO/releases/tag/$TAG"
+            echo "- Opera Add-ons (no upload API): upload \`treetabs-$v-chrome-web-store.zip\` by hand;"
+            echo "  source link for the moderators: $url/treetabs-$v-source.zip"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  chrome-web-store:
+    name: Chrome Web Store
+    needs: [bump, github]
+    if: ${{ !cancelled() && needs.github.result == 'success' && (github.event_name == 'push' || inputs.stores) && vars.CWS_EXTENSION_ID != '' }}
+    runs-on: ubuntu-24.04
+    environment: stores
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ needs.bump.outputs.tag || github.ref_name }}
+      CWS_ITEM: ${{ vars.CWS_EXTENSION_ID }}
+      PUBLISHER: ${{ vars.CWS_PUBLISHER_ID }}
+      PUBLISH_TYPE: ${{ vars.CWS_PUBLISH_TYPE || 'DEFAULT_PUBLISH' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Google sign-in
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.CWS_SERVICE_ACCOUNT_KEY }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+      - name: Upload and submit
+        env:
+          TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          api=https://chromewebstore.googleapis.com
+          item="publishers/$PUBLISHER/items/$CWS_ITEM"
+          auth="Authorization: Bearer $TOKEN"
+          zip="dist/treetabs-${TAG#v}-chrome-web-store.zip"
+          reply=$(curl -sS --fail-with-body -X POST -H "$auth" -T "$zip" "$api/upload/v2/$item:upload")
+          echo "$reply"
+          state=$(jq -r '.uploadState // empty' <<<"$reply")
+          for _ in $(seq 60); do
+            case "$state" in
+              IN_PROGRESS|UPLOAD_IN_PROGRESS) ;;
+              *) break ;;
+            esac
+            sleep 10
+            reply=$(curl -sS --fail-with-body -H "$auth" "$api/v2/$item:fetchStatus")
+            state=$(jq -r '.lastAsyncUploadState // empty' <<<"$reply")
+          done
+          if [ "$state" != SUCCEEDED ]; then
+            echo "upload did not succeed: $state"
+            echo "$reply"
+            exit 1
+          fi
+          curl -sS --fail-with-body -X POST -H "$auth" -H "Content-Type: application/json" \
+            -d "{\"publishType\": \"$PUBLISH_TYPE\"}" "$api/v2/$item:publish"
+          echo "- Chrome Web Store: submitted for review ($PUBLISH_TYPE)" >> "$GITHUB_STEP_SUMMARY"
+
+  firefox-addons:
+    name: Firefox Add-ons
+    needs: [bump, github]
+    if: ${{ !cancelled() && needs.github.result == 'success' && (github.event_name == 'push' || inputs.stores) && vars.AMO_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    environment: stores
+    env:
+      TAG: ${{ needs.bump.outputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Submit (listed, with the source zip)
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          v=${TAG#v}
+          mkdir firefox
+          unzip -q "dist/treetabs-$v-firefox.zip" -d firefox
+          npx --yes web-ext@8.10.0 sign --channel listed --source-dir firefox \
+            --upload-source-code "dist/treetabs-$v-source.zip" \
+            --approval-timeout 0 --artifacts-dir signed
+          echo "- Firefox Add-ons: submitted for review" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,44 @@
+name: Set up the build
+description: Rust from rust-toolchain.toml, build caches, and (optionally) the extension build tools at the versions in xtask/src/main.rs.
+inputs:
+  tools:
+    description: Install wasm-bindgen-cli, wasm-opt and cargo-oxichrome
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Rust toolchain
+      shell: bash
+      run: |
+        rustup toolchain install
+        rustc --version
+    - name: Cargo caches
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          . -> target
+          extension -> target
+          extension/ui -> target
+        cache-bin: "false"
+    - name: Tool versions
+      id: tools
+      if: inputs.tools == 'true'
+      shell: bash
+      run: echo "key=$(sed -n '/^const TOOLS/,/^];/p' xtask/src/main.rs | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+    - name: Cache the build tools
+      if: inputs.tools == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/wasm-bindgen
+          ~/.cargo/bin/wasm-bindgen-test-runner
+          ~/.cargo/bin/wasm2es6js
+          ~/.cargo/bin/wasm-opt
+          ~/.cargo/bin/cargo-oxichrome
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
+        key: build-tools-${{ runner.os }}-${{ steps.tools.outputs.key }}
+    - name: Build tools
+      if: inputs.tools == 'true'
+      shell: bash
+      run: cargo xtask tools --install

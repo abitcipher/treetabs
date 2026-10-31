@@ -1,0 +1,114 @@
+# On every push and pull request: checks, tests, and the packages for each
+# browser (downloadable from the run). A push to main also updates the
+# "edge" pre-release on GitHub. The release workflow runs this too.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: The tag or commit to build
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Format, lint, unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: ./.github/actions/setup
+        with:
+          tools: "false"
+      - name: Format
+        run: |
+          cargo fmt --check
+          (cd extension && cargo fmt --check)
+          (cd extension/ui && cargo fmt --check)
+      - name: Clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          (cd extension && cargo clippy --target wasm32-unknown-unknown -- -D warnings)
+          (cd extension/ui && cargo clippy --target wasm32-unknown-unknown -- -D warnings)
+      - name: Unit tests
+        run: cargo test --workspace
+
+  browser-tests:
+    name: Browser tests (Chromium)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: ./.github/actions/setup
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+      - name: Playwright
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Tests
+        working-directory: tests/e2e
+        run: npx playwright test
+      - name: Test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: tests/e2e/test-results
+          retention-days: 7
+
+  packages:
+    name: Packages
+    needs: checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: ./.github/actions/setup
+      - name: Build
+        run: cargo xtask package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/treetabs-*
+          if-no-files-found: error
+
+  edge:
+    name: Edge pre-release
+    needs: [browser-tests, packages]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency: edge
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Replace the edge pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete edge --yes --cleanup-tag || true
+          gh release create edge dist/* --prerelease --latest=false \
+            --target "$GITHUB_SHA" --title "Latest build from main" \
+            --notes "Built from ${GITHUB_SHA::12}. For testing only: not a release, and not in the stores."
